@@ -1,0 +1,1460 @@
+const { Product, Category, ProductStock, Warehouse, Company, Supplier, InventoryAdjustment, CycleCount, Batch, Movement, sequelize } = require('../models');
+const { Op } = require('sequelize');
+
+/** Ensure product JSON fields from API are proper objects/arrays (e.g. SQLite may return strings) */
+function normalizeProductJson(p) {
+  if (!p) return p;
+  const out = typeof p.get === 'function' ? p.get({ plain: true }) : { ...p };
+  if (typeof out.cartons === 'string') {
+    try { out.cartons = JSON.parse(out.cartons); } catch (_) { out.cartons = null; }
+  }
+  if (out.cartons != null && !Array.isArray(out.cartons)) out.cartons = null;
+  if (typeof out.supplierProducts === 'string') {
+    try { out.supplierProducts = JSON.parse(out.supplierProducts); } catch (_) { out.supplierProducts = null; }
+  }
+  if (out.supplierProducts != null && !Array.isArray(out.supplierProducts)) out.supplierProducts = null;
+  if (typeof out.marketplaceSkus === 'string') {
+    try { out.marketplaceSkus = JSON.parse(out.marketplaceSkus); } catch (_) { out.marketplaceSkus = {}; }
+  }
+  if (out.marketplaceSkus == null || typeof out.marketplaceSkus !== 'object') out.marketplaceSkus = {};
+  if (Array.isArray(out.marketplaceSkus)) out.marketplaceSkus = {};
+  // Coerce dimension/weight to number so frontend always gets consistent types
+  if (out.length != null && out.length !== '') out.length = Number(out.length);
+  if (out.width != null && out.width !== '') out.width = Number(out.width);
+  if (out.height != null && out.height !== '') out.height = Number(out.height);
+  if (out.weight != null && out.weight !== '') out.weight = Number(out.weight);
+  if (typeof out.images === 'string') {
+    try { out.images = JSON.parse(out.images); } catch (_) { out.images = null; }
+  }
+  if (typeof out.priceLists === 'string') {
+    try { out.priceLists = JSON.parse(out.priceLists); } catch (_) { out.priceLists = null; }
+  }
+  if (typeof out.alternativeSkus === 'string') {
+    try { out.alternativeSkus = JSON.parse(out.alternativeSkus); } catch (_) { out.alternativeSkus = null; }
+  }
+  if (out.alternativeSkus != null && !Array.isArray(out.alternativeSkus)) out.alternativeSkus = null;
+  return out;
+}
+
+async function listProducts(reqUser, query = {}) {
+  const where = {};
+  if (reqUser.role !== 'super_admin') where.companyId = reqUser.companyId;
+  else if (query.companyId) where.companyId = query.companyId;
+  if (query.categoryId) where.categoryId = query.categoryId;
+  if (query.status) where.status = query.status;
+  if (query.search) {
+    where[Op.or] = [
+      { name: { [Op.like]: `%${query.search}%` } },
+      { sku: { [Op.like]: `%${query.search}%` } },
+      { barcode: { [Op.like]: `%${query.search}%` } },
+      { color: { [Op.like]: `%${query.search}%` } },
+    ];
+  }
+  const products = await Product.findAll({
+    where,
+    order: [['createdAt', 'DESC']],
+    include: [
+      { association: 'Category', attributes: ['id', 'name', 'code'], required: false },
+      { association: 'Company', attributes: ['id', 'name', 'code'], required: false },
+      { association: 'ProductStocks', attributes: ['quantity', 'warehouseId'], required: false },
+    ],
+  });
+  return products;
+}
+
+async function listCategories(reqUser, query = {}) {
+  const where = {};
+  if (reqUser.role !== 'super_admin') where.companyId = reqUser.companyId;
+  else if (query.companyId) where.companyId = query.companyId;
+  const categories = await Category.findAll({
+    where,
+    order: [['name']],
+    include: [{ association: 'Products', attributes: ['id'], required: false }],
+  });
+  return categories.map(c => {
+    const j = c.toJSON();
+    j.productCount = (j.Products && j.Products.length) || 0;
+    delete j.Products;
+    return j;
+  });
+}
+
+async function getProductById(id, reqUser) {
+  const product = await Product.findByPk(id, {
+    include: [
+      { association: 'Category' },
+      { association: 'Company', attributes: ['id', 'name', 'code'] },
+      { association: 'Supplier', attributes: ['id', 'name', 'code'] },
+      { association: 'ProductStocks', include: [{ association: 'Warehouse' }, { association: 'Location' }] },
+      {
+        association: 'ProductionFormulas',
+        include: [
+          { association: 'ProductionFormulaItems', include: [{ model: Product, as: 'RawMaterial', attributes: ['id', 'name', 'sku'] }] }
+        ]
+      },
+    ],
+  });
+  if (!product) throw new Error('Product not found');
+  if (reqUser.role !== 'super_admin' && product.companyId !== reqUser.companyId) throw new Error('Product not found');
+  return normalizeProductJson(product);
+}
+
+async function createProduct(data, reqUser) {
+  if (reqUser.role !== 'super_admin' && reqUser.role !== 'company_admin' && reqUser.role !== 'inventory_manager' && reqUser.role !== 'warehouse_manager') {
+    throw new Error('Not allowed to create product');
+  }
+  const companyId = reqUser.companyId || data.companyId;
+  if (!companyId) throw new Error('companyId required');
+  const existing = await Product.findOne({ where: { companyId, sku: data.sku.trim() } });
+  if (existing) throw new Error('SKU already exists for this company');
+  const payload = {
+    companyId,
+    categoryId: data.categoryId || null,
+    supplierId: data.supplierId || null,
+    name: data.name,
+    sku: data.sku.trim(),
+    barcode: data.barcode || null,
+    description: data.description || null,
+    color: data.color || null,
+    productType: data.productType || null,
+    unitOfMeasure: data.unitOfMeasure || null,
+    price: data.price ?? 0,
+    costPrice: data.costPrice != null ? data.costPrice : null,
+    vatRate: data.vatRate != null ? data.vatRate : null,
+    vatCode: data.vatCode || null,
+    customsTariff: data.customsTariff != null ? String(data.customsTariff) : null,
+    marketplaceSkus: data.marketplaceSkus && typeof data.marketplaceSkus === 'object' ? data.marketplaceSkus : null,
+    heatSensitive: data.heatSensitive || null,
+    perishable: data.perishable || null,
+    requireBatchTracking: data.requireBatchTracking || null,
+    shelfLifeDays: data.shelfLifeDays != null ? data.shelfLifeDays : null,
+    length: data.length != null ? data.length : null,
+    width: data.width != null ? data.width : null,
+    height: data.height != null ? data.height : null,
+    dimensionUnit: data.dimensionUnit || null,
+    weight: data.weight != null ? data.weight : null,
+    weightUnit: data.weightUnit || null,
+    reorderLevel: data.reorderLevel ?? 0,
+    reorderQty: data.reorderQty != null ? data.reorderQty : null,
+    maxStock: data.maxStock != null ? data.maxStock : null,
+    status: data.status || 'ACTIVE',
+    images: Array.isArray(data.images) ? data.images : null,
+    cartons: Array.isArray(data.cartons) ? data.cartons : (data.cartons && typeof data.cartons === 'object' ? data.cartons : null),
+    priceLists: data.priceLists && typeof data.priceLists === 'object' ? data.priceLists : null,
+    supplierProducts: Array.isArray(data.supplierProducts) ? data.supplierProducts : null,
+    alternativeSkus: Array.isArray(data.alternativeSkus) ? data.alternativeSkus : null,
+    currency: data.currency || (reqUser.currencyPreference) || 'USD',
+  };
+  console.log('[DEBUG_SERVICE] Creating Product Payload:', JSON.stringify(payload, null, 2));
+  const created = await Product.create(payload);
+
+  // [NEW] Handle Initial Stock creation if openingStock is provided
+  const openingStock = Number(data.openingStock) || 0;
+  const { initialWarehouseId, initialLocationId } = data;
+  if (openingStock > 0 && initialWarehouseId) {
+    await ProductStock.create({
+      productId: created.id,
+      warehouseId: initialWarehouseId,
+      locationId: initialLocationId || null,
+      quantity: openingStock,
+      status: 'ACTIVE',
+    });
+
+    // Log movement for Live Stock feed
+    await Movement.create({
+      companyId: payload.companyId,
+      productId: created.id,
+      warehouseId: initialWarehouseId,
+      toLocationId: initialLocationId || null,
+      type: 'INCREASE',
+      quantity: openingStock,
+      reason: 'Opening Stock',
+      createdBy: reqUser.id,
+    });
+
+    // [NEW] Log as Adjustment for Inventory history
+    await InventoryAdjustment.create({
+      referenceNumber: generateAdjustmentReference(),
+      companyId: payload.companyId,
+      productId: created.id,
+      warehouseId: initialWarehouseId,
+      type: 'INCREASE',
+      quantity: openingStock,
+      reason: 'Opening Stock',
+      notes: 'Initial stock added during product creation',
+      status: 'COMPLETED',
+      createdBy: reqUser.id,
+    });
+  } else if (initialWarehouseId) {
+    // Even if 0 stock, create the stock record so it appears in Live Stock if needed
+    await ProductStock.create({
+      productId: created.id,
+      warehouseId: initialWarehouseId,
+      locationId: initialLocationId || null,
+      quantity: 0,
+      status: 'ACTIVE',
+    });
+  }
+
+  return normalizeProductJson(created);
+}
+
+async function bulkCreateProducts(productsArray, reqUser) {
+  if (reqUser.role !== 'super_admin' && reqUser.role !== 'company_admin' && reqUser.role !== 'inventory_manager' && reqUser.role !== 'warehouse_manager') {
+    throw new Error('Not allowed to import products');
+  }
+  const companyId = reqUser.companyId;
+  if (!companyId) throw new Error('Company required');
+  if (!Array.isArray(productsArray) || productsArray.length === 0) {
+    throw new Error('No products to import');
+  }
+  const results = { created: 0, skipped: 0, errors: [] };
+  for (let i = 0; i < productsArray.length; i++) {
+    const data = productsArray[i];
+    try {
+      if (!data || !data.sku || !data.name) {
+        results.skipped++;
+        results.errors.push({ row: i + 1, message: 'SKU and Product Name required' });
+        continue;
+      }
+      const existing = await Product.findOne({ where: { companyId, sku: String(data.sku).trim() } });
+      if (existing) {
+        results.skipped++;
+        results.errors.push({ row: i + 1, sku: data.sku, message: 'SKU already exists' });
+        continue;
+      }
+      await Product.create({
+        companyId,
+        categoryId: data.categoryId != null ? data.categoryId : null,
+        supplierId: data.supplierId != null ? data.supplierId : null,
+        name: String(data.name).trim(),
+        sku: String(data.sku).trim(),
+        barcode: data.barcode ? String(data.barcode).trim() : null,
+        description: data.description ? String(data.description).trim() : null,
+        color: data.color ? String(data.color).trim() : null,
+        productType: data.productType || null,
+        unitOfMeasure: data.unitOfMeasure || null,
+        price: data.price != null ? Number(data.price) : 0,
+        costPrice: data.costPrice != null ? Number(data.costPrice) : null,
+        vatRate: data.vatRate != null ? Number(data.vatRate) : null,
+        vatCode: data.vatCode || null,
+        customsTariff: data.customsTariff != null ? String(data.customsTariff) : null,
+        marketplaceSkus: data.marketplaceSkus && typeof data.marketplaceSkus === 'object' ? data.marketplaceSkus : null,
+        heatSensitive: data.heatSensitive || null,
+        perishable: data.perishable || null,
+        requireBatchTracking: data.requireBatchTracking || null,
+        shelfLifeDays: data.shelfLifeDays != null ? Number(data.shelfLifeDays) : null,
+        length: data.length != null ? Number(data.length) : null,
+        width: data.width != null ? Number(data.width) : null,
+        height: data.height != null ? Number(data.height) : null,
+        dimensionUnit: data.dimensionUnit || null,
+        weight: data.weight != null ? Number(data.weight) : null,
+        weightUnit: data.weightUnit || null,
+        reorderLevel: data.reorderLevel != null ? Number(data.reorderLevel) : 0,
+        reorderQty: data.reorderQty != null ? Number(data.reorderQty) : null,
+        maxStock: data.maxStock != null ? Number(data.maxStock) : null,
+        status: data.status && String(data.status).toUpperCase() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE',
+        images: null,
+        cartons: Array.isArray(data.cartons) && data.cartons.length > 0 ? data.cartons : null,
+        priceLists: null,
+        supplierProducts: null,
+        alternativeSkus: null,
+        currency: data.currency || 'USD',
+      });
+      results.created++;
+    } catch (err) {
+      results.skipped++;
+      results.errors.push({ row: i + 1, sku: data?.sku, message: err.message || 'Failed' });
+    }
+  }
+  return results;
+}
+
+async function updateProduct(id, data, reqUser) {
+  const product = await Product.findByPk(id);
+  if (!product) throw new Error('Product not found');
+  if (reqUser.role !== 'super_admin' && product.companyId !== reqUser.companyId) throw new Error('Product not found');
+  // Only update fields that are present in data (partial update) – baki data null nahi hoga
+  const upd = {};
+  if (data.name !== undefined) upd.name = data.name ?? product.name;
+  if (data.categoryId !== undefined) upd.categoryId = data.categoryId;
+  if (data.supplierId !== undefined) upd.supplierId = data.supplierId;
+  if (data.sku !== undefined) upd.sku = data.sku?.trim() ?? product.sku;
+  if (data.barcode !== undefined) upd.barcode = data.barcode;
+  if (data.description !== undefined) upd.description = data.description;
+  if (data.color !== undefined) {
+    console.log(`[DEBUG_SERVICE] Updating color to: "${data.color}"`);
+    upd.color = data.color;
+  }
+  if (data.productType !== undefined) upd.productType = data.productType;
+  if (data.unitOfMeasure !== undefined) upd.unitOfMeasure = data.unitOfMeasure;
+  if (data.price !== undefined) upd.price = data.price;
+  if (data.costPrice !== undefined) upd.costPrice = data.costPrice;
+  if (data.vatRate !== undefined) upd.vatRate = data.vatRate;
+  if (data.vatCode !== undefined) upd.vatCode = data.vatCode;
+  if (data.customsTariff !== undefined) upd.customsTariff = data.customsTariff != null ? String(data.customsTariff) : null;
+  if (data.marketplaceSkus !== undefined) upd.marketplaceSkus = data.marketplaceSkus && typeof data.marketplaceSkus === 'object' ? data.marketplaceSkus : product.marketplaceSkus;
+  if (data.heatSensitive !== undefined) upd.heatSensitive = data.heatSensitive;
+  if (data.perishable !== undefined) upd.perishable = data.perishable;
+  if (data.requireBatchTracking !== undefined) upd.requireBatchTracking = data.requireBatchTracking;
+  if (data.shelfLifeDays !== undefined) upd.shelfLifeDays = data.shelfLifeDays;
+  if (data.length !== undefined) upd.length = data.length;
+  if (data.width !== undefined) upd.width = data.width;
+  if (data.height !== undefined) upd.height = data.height;
+  if (data.dimensionUnit !== undefined) upd.dimensionUnit = data.dimensionUnit;
+  if (data.weight !== undefined) upd.weight = data.weight;
+  if (data.weightUnit !== undefined) upd.weightUnit = data.weightUnit;
+  if (data.reorderLevel !== undefined) upd.reorderLevel = data.reorderLevel;
+  if (data.reorderQty !== undefined) upd.reorderQty = data.reorderQty;
+  if (data.maxStock !== undefined) upd.maxStock = data.maxStock;
+  if (data.status !== undefined) upd.status = data.status ?? product.status;
+  if (data.images !== undefined) upd.images = Array.isArray(data.images) ? data.images : product.images;
+  if (data.cartons !== undefined) upd.cartons = Array.isArray(data.cartons) ? data.cartons : (data.cartons && typeof data.cartons === 'object' ? data.cartons : product.cartons);
+  if (data.priceLists !== undefined) upd.priceLists = data.priceLists && typeof data.priceLists === 'object' ? data.priceLists : product.priceLists;
+  if (data.supplierProducts !== undefined) upd.supplierProducts = Array.isArray(data.supplierProducts) ? data.supplierProducts : product.supplierProducts;
+  if (data.alternativeSkus !== undefined) upd.alternativeSkus = Array.isArray(data.alternativeSkus) ? data.alternativeSkus : product.alternativeSkus;
+  if (data.currency !== undefined) upd.currency = data.currency;
+  if (Object.keys(upd).length === 0) return normalizeProductJson(product);
+  console.log('[DEBUG_SERVICE] Final Update Object:', JSON.stringify(upd, null, 2));
+  await product.update(upd);
+  const updated = await Product.findByPk(id, {
+    include: [
+      { association: 'Category' },
+      { association: 'Company', attributes: ['id', 'name', 'code'] },
+      { association: 'Supplier', attributes: ['id', 'name', 'code'] },
+      { association: 'ProductStocks', include: [{ association: 'Warehouse' }, { association: 'Location' }] },
+      {
+        association: 'ProductionFormulas',
+        include: [
+          { association: 'ProductionFormulaItems', include: [{ model: Product, as: 'RawMaterial', attributes: ['id', 'name', 'sku'] }] }
+        ]
+      },
+    ],
+  });
+  return normalizeProductJson(updated || product);
+}
+
+async function addAlternativeSku(productId, payload, reqUser) {
+  const product = await Product.findByPk(productId, {
+    include: [
+      { association: 'Category' },
+      { association: 'Company', attributes: ['id', 'name', 'code'] },
+      { association: 'Supplier', attributes: ['id', 'name', 'code'] },
+      { association: 'ProductStocks', include: [{ association: 'Warehouse' }, { association: 'Location' }] },
+    ],
+  });
+  if (!product) throw new Error('Product not found');
+  if (reqUser.role !== 'super_admin' && product.companyId !== reqUser.companyId) throw new Error('Product not found');
+  const list = Array.isArray(product.alternativeSkus) ? [...product.alternativeSkus] : [];
+  const newItem = {
+    id: payload.id || `alt-${Date.now()}`,
+    channelType: payload.channelType || null,
+    sku: payload.sku?.trim() || null,
+    skuType: payload.skuType || null,
+    isPrimary: !!payload.isPrimary,
+    active: payload.active !== false,
+    notes: payload.notes?.trim() || null,
+    leadTimeDays: payload.leadTimeDays != null ? payload.leadTimeDays : null,
+    moq: payload.moq != null ? payload.moq : null,
+  };
+  list.push(newItem);
+  await product.update({ alternativeSkus: list });
+  const updated = await Product.findByPk(productId, {
+    include: [
+      { association: 'Category' },
+      { association: 'Company', attributes: ['id', 'name', 'code'] },
+      { association: 'Supplier', attributes: ['id', 'name', 'code'] },
+      { association: 'ProductStocks', include: [{ association: 'Warehouse' }, { association: 'Location' }] },
+    ],
+  });
+  return normalizeProductJson(updated || product);
+}
+
+async function removeProduct(id, reqUser) {
+  const product = await Product.findByPk(id);
+  if (!product) throw new Error('Product not found');
+  if (reqUser.role !== 'super_admin' && product.companyId !== reqUser.companyId) throw new Error('Product not found');
+  await ProductStock.destroy({ where: { productId: id } });
+  await product.destroy();
+  return { message: 'Product deleted' };
+}
+
+async function createCategory(data, reqUser) {
+  const companyId = reqUser.companyId || data.companyId;
+  if (!companyId) throw new Error('companyId required');
+  const code = data.code?.trim() || data.name.replace(/\s/g, '_').toUpperCase().slice(0, 50);
+  const existing = await Category.findOne({ where: { companyId, code } });
+  if (existing) throw new Error('Category code already exists for this company');
+  return Category.create({
+    companyId,
+    name: data.name,
+    code,
+  });
+}
+
+async function updateCategory(id, data, reqUser) {
+  const cat = await Category.findByPk(id);
+  if (!cat) throw new Error('Category not found');
+  if (reqUser.role !== 'super_admin' && cat.companyId !== reqUser.companyId) throw new Error('Category not found');
+  await cat.update({
+    name: data.name ?? cat.name,
+    code: data.code?.trim() ?? cat.code,
+  });
+  return cat;
+}
+
+async function removeCategory(id, reqUser) {
+  const cat = await Category.findByPk(id);
+  if (!cat) throw new Error('Category not found');
+  if (reqUser.role !== 'super_admin' && cat.companyId !== reqUser.companyId) throw new Error('Category not found');
+  await cat.destroy();
+  return { message: 'Category deleted' };
+}
+
+async function listStock(reqUser, query = {}) {
+  const where = {};
+  if (query.warehouseId) where.warehouseId = query.warehouseId;
+  if (query.productId) where.productId = query.productId;
+  const stocks = await ProductStock.findAll({
+    where,
+    include: [
+      {
+        association: 'Product',
+        where: reqUser.role !== 'super_admin' ? { companyId: reqUser.companyId } : undefined,
+        required: reqUser.role !== 'super_admin',
+        include: [{ association: 'Category', attributes: ['id', 'name'] }]
+      },
+      { association: 'Warehouse', include: ['Company'] },
+      { association: 'Location', required: false },
+    ],
+  });
+  return stocks;
+}
+
+async function createStock(data, reqUser) {
+  const { Product } = require('../models');
+  const product = await Product.findByPk(data.productId);
+  if (!product) throw new Error('Product not found');
+  if (reqUser.role !== 'super_admin' && product.companyId !== reqUser.companyId) throw new Error('Product not found');
+
+  if (data.warehouseId && data.quantity > 0) {
+    const warehouseService = require('./warehouseService');
+    await warehouseService.validateCapacity(data.warehouseId, data.quantity);
+  }
+
+  const stock = await ProductStock.create({
+    productId: data.productId,
+    warehouseId: data.warehouseId,
+    locationId: data.locationId || null,
+    quantity: data.quantity ?? 0,
+    reserved: data.reserved ?? 0,
+    status: data.status || 'ACTIVE',
+    lotNumber: data.lotNumber || null,
+    batchNumber: data.batchNumber || null,
+    serialNumber: data.serialNumber || null,
+    bestBeforeDate: data.bestBeforeDate || null,
+  });
+
+  // [NEW] Log adjustment for new stock if quantity > 0
+  if (data.quantity > 0) {
+    const qty = parseFloat(data.quantity);
+    const companyId = product.companyId;
+
+    await InventoryAdjustment.create({
+      referenceNumber: generateAdjustmentReference(),
+      companyId,
+      productId: data.productId,
+      warehouseId: data.warehouseId,
+      type: 'INCREASE',
+      quantity: qty,
+      reason: 'Initial Inventory',
+      notes: 'Added via New Stock record',
+      status: 'COMPLETED',
+      createdBy: reqUser.id,
+    });
+
+    await Movement.create({
+      companyId,
+      productId: data.productId,
+      warehouseId: data.warehouseId,
+      toLocationId: data.locationId || null,
+      type: 'INCREASE',
+      quantity: qty,
+      reason: 'Initial Inventory',
+      createdBy: reqUser.id,
+    });
+  }
+  return ProductStock.findByPk(stock.id, {
+    include: [
+      { association: 'Product' },
+      { association: 'Warehouse' },
+      { association: 'Location', required: false },
+    ],
+  });
+}
+
+async function updateStock(stockId, data, reqUser) {
+  const stock = await ProductStock.findByPk(stockId, { include: ['Product'] });
+  if (!stock) throw new Error('Stock not found');
+  const oldQty = parseFloat(stock.quantity || 0);
+  if (reqUser.role !== 'super_admin' && reqUser.role !== 'inventory_manager' && reqUser.role !== 'company_admin' && reqUser.role !== 'warehouse_manager') {
+    throw new Error('Not allowed');
+  }
+  if (stock.Product.companyId !== reqUser.companyId && reqUser.role !== 'super_admin') throw new Error('Stock not found');
+
+  if (data.quantity !== undefined && data.quantity > stock.quantity) {
+    const warehouseService = require('./warehouseService');
+    await warehouseService.validateCapacity(stock.warehouseId, data.quantity - stock.quantity);
+  }
+
+  await stock.update({
+    quantity: data.quantity !== undefined ? data.quantity : stock.quantity,
+    reserved: data.reserved !== undefined ? data.reserved : stock.reserved,
+    locationId: data.locationId !== undefined ? data.locationId : stock.locationId,
+    status: data.status !== undefined ? data.status : stock.status,
+    lotNumber: data.lotNumber !== undefined ? data.lotNumber : stock.lotNumber,
+    batchNumber: data.batchNumber !== undefined ? data.batchNumber : stock.batchNumber,
+    serialNumber: data.serialNumber !== undefined ? data.serialNumber : stock.serialNumber,
+    bestBeforeDate: data.bestBeforeDate !== undefined ? data.bestBeforeDate : stock.bestBeforeDate,
+  });
+
+  // [NEW] Log adjustment if quantity was manually updated
+  if (data.quantity !== undefined && parseFloat(data.quantity) !== oldQty) {
+    const diff = parseFloat(data.quantity) - oldQty;
+    const type = diff > 0 ? 'INCREASE' : 'DECREASE';
+    const absDiff = Math.abs(diff);
+    const companyId = stock.Product?.companyId || reqUser.companyId;
+
+    await InventoryAdjustment.create({
+      referenceNumber: generateAdjustmentReference(),
+      companyId,
+      productId: stock.productId,
+      warehouseId: stock.warehouseId,
+      type: type,
+      quantity: absDiff,
+      reason: 'Manual Edit',
+      notes: `Stock updated from ${oldQty} to ${data.quantity} via Edit Modal`,
+      status: 'COMPLETED',
+      createdBy: reqUser.id,
+    });
+
+    await Movement.create({
+      companyId,
+      productId: stock.productId,
+      warehouseId: stock.warehouseId,
+      toLocationId: stock.locationId,
+      type: type,
+      quantity: absDiff,
+      reason: 'Manual Edit',
+      notes: `Manual inventory update from ${oldQty} to ${data.quantity}`,
+      createdBy: reqUser.id,
+    });
+  }
+  return stock;
+}
+
+async function removeStock(stockId, reqUser) {
+  const stock = await ProductStock.findByPk(stockId, { include: ['Product'] });
+  if (!stock) throw new Error('Stock not found');
+  if (reqUser.role !== 'super_admin' && reqUser.role !== 'inventory_manager' && reqUser.role !== 'company_admin') throw new Error('Not allowed');
+  if (stock.Product && stock.Product.companyId !== reqUser.companyId && reqUser.role !== 'super_admin') throw new Error('Stock not found');
+  await stock.destroy();
+  return { message: 'Stock record deleted' };
+}
+
+async function listStockByBestBeforeDate(reqUser, query = {}) {
+  const where = {};
+  if (query.productId) where.productId = query.productId;
+  if (query.warehouseId) where.warehouseId = query.warehouseId;
+  const hasDateFilter = query.minBbd || query.maxBbd;
+  if (hasDateFilter) {
+    const bbdCond = [{ [Op.ne]: null }];
+    if (query.minBbd) bbdCond.push({ [Op.gte]: query.minBbd });
+    if (query.maxBbd) bbdCond.push({ [Op.lte]: query.maxBbd });
+    where.bestBeforeDate = { [Op.and]: bbdCond };
+  }
+  // when no date filter: return all stock (including bestBeforeDate = null) so report shows data
+  const productWhere = (reqUser.role !== 'super_admin' && reqUser.companyId) ? { companyId: reqUser.companyId } : undefined;
+  const stocks = await ProductStock.findAll({
+    where,
+    include: [
+      { association: 'Product', where: productWhere, required: !!productWhere, attributes: ['id', 'name', 'sku', 'barcode'] },
+      { association: 'Warehouse', attributes: ['id', 'name'] },
+    ],
+  });
+  const byKey = {};
+  for (const s of stocks) {
+    const key = `${s.productId}-${s.bestBeforeDate}`;
+    if (!byKey[key]) {
+      byKey[key] = {
+        productId: s.productId,
+        productName: s.Product?.name,
+        productSku: s.Product?.sku,
+        bestBeforeDate: s.bestBeforeDate,
+        totalAvailable: 0,
+        bbdCount: 0,
+      };
+    }
+    byKey[key].totalAvailable += Math.max(0, (s.quantity || 0) - (s.reserved || 0));
+    byKey[key].bbdCount += 1;
+  }
+  return Object.values(byKey).sort((a, b) => (a.bestBeforeDate || '').localeCompare(b.bestBeforeDate || ''));
+}
+
+async function listStockByLocation(reqUser, query = {}) {
+  const { Location, Zone } = require('../models');
+  const where = {};
+  if (query.warehouseId) where.warehouseId = query.warehouseId;
+  const productWhere = (reqUser.role !== 'super_admin' && reqUser.companyId) ? { companyId: reqUser.companyId } : undefined;
+  const include = [
+    { association: 'Product', where: productWhere, required: !!productWhere, attributes: ['id', 'name', 'sku'] },
+    { association: 'Warehouse', attributes: ['id', 'name'] },
+    { association: 'Location', required: false, include: [{ association: 'Zone', attributes: ['id', 'name', 'code'] }] },
+  ];
+  const stocks = await ProductStock.findAll({ where, include });
+  const byLoc = {};
+  for (const s of stocks) {
+    const locId = s.locationId || 0;
+    const loc = s.Location;
+    if (query.locationType && loc && loc.locationType !== query.locationType) continue;
+    if (!byLoc[locId]) {
+      byLoc[locId] = {
+        locationId: locId || null,
+        locationName: loc?.name || 'Unassigned',
+        locationCode: loc?.code || loc?.name || '',
+        locationType: loc?.locationType || '—',
+        zoneName: loc?.Zone?.name || loc?.Zone?.code || '—',
+        properties: loc?.heatSensitive === 'yes' ? 'Hot Location' : (loc?.heatSensitive ? String(loc.heatSensitive) : '—'),
+        pickSequence: loc?.pickSequence ?? null,
+        totalItems: 0,
+        productIds: new Set(),
+        warnings: [],
+      };
+    }
+    byLoc[locId].totalItems += (s.quantity || 0);
+    byLoc[locId].productIds.add(s.productId);
+    if (s.bestBeforeDate && new Date(s.bestBeforeDate) <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)) {
+      if (!byLoc[locId].warnings.includes('Expiring soon')) byLoc[locId].warnings.push('Expiring soon');
+    }
+  }
+  return Object.values(byLoc)
+    .map((r) => ({ ...r, productCount: r.productIds.size, productIds: undefined, warnings: r.warnings.length ? r.warnings.join('; ') : '—' }))
+    .sort((a, b) => (a.pickSequence != null && b.pickSequence != null ? a.pickSequence - b.pickSequence : (a.locationCode || '').localeCompare(b.locationCode || '')));
+}
+
+function generateAdjustmentReference() {
+  return 'ADJ-' + Buffer.from(Date.now().toString(36) + Math.random().toString(36).slice(2)).toString('base64').replace(/[/+=]/g, '').slice(0, 8).toUpperCase();
+}
+
+async function listAdjustments(reqUser, query = {}) {
+  const where = {};
+  const role = (reqUser.role || '').toString().toLowerCase().replace(/-/g, '_');
+  if (role !== 'super_admin' && reqUser.companyId) where.companyId = reqUser.companyId;
+  if (query.type) where.type = query.type;
+  if (query.status) where.status = query.status;
+  if (query.startDate || query.endDate) {
+    where.createdAt = {};
+    if (query.startDate) where.createdAt[Op.gte] = new Date(query.startDate + 'T00:00:00');
+    if (query.endDate) where.createdAt[Op.lte] = new Date(query.endDate + 'T23:59:59');
+  }
+  if (query.search) {
+    where[Op.or] = [
+      { referenceNumber: { [Op.like]: `%${query.search}%` } },
+      { reason: { [Op.like]: `%${query.search}%` } },
+    ];
+  }
+  const list = await InventoryAdjustment.findAll({
+    where,
+    order: [['createdAt', 'DESC']],
+    include: [
+      { association: 'Product', attributes: ['id', 'name', 'sku'] },
+      { association: 'Warehouse', required: false, attributes: ['id', 'name'] },
+      { association: 'createdByUser', required: false, attributes: ['id', 'name', 'email'] },
+    ],
+  });
+  return list.map((a) => {
+    const j = a.toJSON();
+    j.items = [{ product: j.Product, quantity: j.quantity }];
+    j.createdBy = j.createdByUser;
+    delete j.createdByUser;
+    delete j.Product;
+    return j;
+  });
+}
+
+async function createAdjustment(data, reqUser) {
+  const role = (reqUser.role || '').toString().toLowerCase().replace(/-/g, '_');
+  const allowedRoles = ['super_admin', 'company_admin', 'inventory_manager', 'warehouse_manager', 'picker', 'packer'];
+  if (!allowedRoles.includes(role)) {
+    throw new Error('Not allowed to create adjustment');
+  }
+  const companyId = reqUser.companyId || data.companyId;
+  if (!companyId && role !== 'super_admin') throw new Error('Company context required');
+
+  let productId = data.productId;
+  if (!productId && (data.sku || data.barcode)) {
+    const searchTerm = (data.sku || data.barcode || '').trim();
+    if (searchTerm) {
+      const p = await Product.findOne({
+        where: {
+          companyId: companyId,
+          [Op.or]: [
+            { sku: searchTerm },
+            { barcode: searchTerm },
+            // Search in alternativeSkus JSON if applicable
+            sequelize.where(
+              sequelize.fn('JSON_CONTAINS', sequelize.col('alternative_skus'), JSON.stringify(searchTerm)),
+              1
+            )
+          ]
+        }
+      });
+      if (p) productId = p.id;
+    }
+  }
+
+  if (!productId) throw new Error('Product not found');
+  const product = await Product.findByPk(productId);
+  if (!product) throw new Error('Product not found');
+  if (companyId && product.companyId !== companyId && role !== 'super_admin') throw new Error('Product not found');
+
+  const effectiveCompanyId = companyId || product.companyId;
+
+  // Auto-detect type from quantity sign if not explicitly provided
+  const rawQty = parseFloat(data.quantity) || 0;
+  let type;
+  if (data.type && (data.type.toUpperCase() === 'INCREASE' || data.type.toUpperCase() === 'DECREASE')) {
+    type = data.type.toUpperCase();
+  } else {
+    type = rawQty >= 0 ? 'INCREASE' : 'DECREASE';
+  }
+  const qty = Math.abs(rawQty);
+  if (qty <= 0) throw new Error('Quantity must be greater than 0');
+  const referenceNumber = generateAdjustmentReference();
+  let warehouseId = data.warehouseId || null;
+
+  if (type === 'INCREASE' && warehouseId) {
+    const warehouseService = require('./warehouseService');
+    await warehouseService.validateCapacity(warehouseId, qty);
+  }
+
+  const stockWhere = { productId: productId };
+  if (warehouseId) stockWhere.warehouseId = warehouseId;
+  let stock = await ProductStock.findOne({ where: stockWhere });
+  if (!stock && !warehouseId) {
+    stock = await ProductStock.findOne({ where: { productId: productId } });
+    if (stock) warehouseId = stock.warehouseId;
+  }
+  if (type === 'DECREASE' && (!stock || (stock.quantity || 0) - (stock.reserved || 0) < qty)) {
+    throw new Error('Insufficient available stock for decrease');
+  }
+  const adjustment = await InventoryAdjustment.create({
+    referenceNumber,
+    companyId: effectiveCompanyId,
+    productId: productId,
+    warehouseId: warehouseId || (stock && stock.warehouseId) || null,
+    type,
+    quantity: qty,
+    reason: data.reason || null,
+    notes: data.notes || null,
+    status: 'PENDING',
+    createdBy: reqUser.id,
+  });
+  if (stock) {
+    const currentQty = parseFloat(stock.quantity || 0);
+    const newQty = type === 'INCREASE' ? currentQty + qty : Math.max(0, currentQty - qty);
+    await stock.update({ quantity: newQty });
+  } else if (type === 'INCREASE') {
+    if (!warehouseId) {
+      const { Warehouse } = require('../models');
+      const firstWarehouse = await Warehouse.findOne({ where: { companyId: effectiveCompanyId } });
+      if (!firstWarehouse) throw new Error('No warehouse found for company');
+      warehouseId = firstWarehouse.id;
+    }
+    // Create new stock record if it doesn't exist for this warehouse
+    await ProductStock.create({
+      productId: productId,
+      warehouseId,
+      quantity: qty,
+      reserved: 0,
+    });
+  }
+  await adjustment.update({ status: 'COMPLETED' });
+
+  // [NEW] Log as Movement for Live Stock feed
+  await Movement.create({
+    companyId: effectiveCompanyId,
+    type: type, // INCREASE or DECREASE
+    productId: productId,
+    warehouseId: warehouseId || (stock && stock.warehouseId) || null,
+    toLocationId: stock ? stock.locationId : null,
+    quantity: qty,
+    reason: data.reason || 'Manual Adjustment',
+    notes: data.notes || `Reference: ${referenceNumber}`,
+    createdBy: reqUser.id,
+  });
+  return InventoryAdjustment.findByPk(adjustment.id, {
+    include: [
+      { association: 'Product', attributes: ['id', 'name', 'sku'] },
+      { association: 'Warehouse', required: false, attributes: ['id', 'name'] },
+      { association: 'createdByUser', required: false, attributes: ['id', 'name', 'email'] },
+    ],
+  }).then((a) => {
+    const j = a.toJSON();
+    j.items = [{ product: j.Product, quantity: j.quantity }];
+    j.createdBy = j.createdByUser;
+    delete j.createdByUser;
+    delete j.Product;
+    return j;
+  });
+}
+
+async function removeAdjustment(id, reqUser) {
+  const adj = await InventoryAdjustment.findByPk(id);
+  if (!adj) throw new Error('Adjustment not found');
+  if (reqUser.role !== 'super_admin' && adj.companyId !== reqUser.companyId) throw new Error('Adjustment not found');
+
+  // Revert stock change
+  const stock = await ProductStock.findOne({
+    where: {
+      productId: adj.productId,
+      warehouseId: adj.warehouseId || null
+    }
+  });
+
+  if (stock) {
+    if (adj.type === 'INCREASE') {
+      await stock.decrement('quantity', { by: adj.quantity });
+    } else {
+      await stock.increment('quantity', { by: adj.quantity });
+    }
+  }
+
+  await adj.destroy();
+  return { message: 'Adjustment deleted and stock reverted' };
+}
+
+async function listCycleCounts(reqUser, query = {}) {
+  const where = {};
+  if (reqUser.role !== 'super_admin') where.companyId = reqUser.companyId;
+  if (query.status) where.status = query.status;
+  if (query.search) {
+    where[Op.or] = [
+      { referenceNumber: { [Op.like]: `%${query.search}%` } },
+      { countName: { [Op.like]: `%${query.search}%` } },
+    ];
+  }
+  const list = await CycleCount.findAll({
+    where,
+    order: [['scheduledDate', 'DESC'], ['createdAt', 'DESC']],
+    include: [
+      { association: 'Location', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'countedByUser', required: false, attributes: ['id', 'name', 'email'] },
+    ],
+  });
+  return list.map((c) => {
+    const j = c.toJSON();
+    j.countedBy = j.countedByUser;
+    delete j.countedByUser;
+    return j;
+  });
+}
+
+async function createCycleCount(data, reqUser) {
+  if (reqUser.role !== 'super_admin' && reqUser.role !== 'company_admin' && reqUser.role !== 'inventory_manager' && reqUser.role !== 'warehouse_manager') {
+    throw new Error('Not allowed to create cycle count');
+  }
+  const companyId = reqUser.companyId || data.companyId;
+  if (!companyId) throw new Error('Company context required');
+  const count = await CycleCount.create({
+    companyId,
+    countName: data.countName || 'Cycle Count',
+    countType: data.countType || null,
+    locationId: data.locationId || null,
+    scheduledDate: data.scheduledDate || null,
+    notes: data.notes || null,
+    status: 'PENDING',
+    itemsCount: 0,
+    discrepancies: 0,
+    countedBy: null,
+  });
+  const refNum = 'CC-' + String(count.id).padStart(5, '0');
+  await count.update({ referenceNumber: refNum });
+  return CycleCount.findByPk(count.id, {
+    include: [
+      { association: 'Location', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'countedByUser', required: false, attributes: ['id', 'name', 'email'] },
+    ],
+  }).then((c) => {
+    const j = c.toJSON();
+    j.countedBy = j.countedByUser;
+    delete j.countedByUser;
+    return j;
+  });
+}
+
+
+async function completeCycleCount(id, data, reqUser) {
+  if (reqUser.role !== 'super_admin' && reqUser.role !== 'company_admin' && reqUser.role !== 'inventory_manager' && reqUser.role !== 'warehouse_manager') {
+    throw new Error('Not allowed to complete cycle count');
+  }
+
+  const count = await CycleCount.findByPk(id);
+  if (!count) throw new Error('Cycle count not found');
+  if (count.status === 'COMPLETED') throw new Error('Cycle count already completed');
+
+  if (reqUser.role !== 'super_admin' && count.companyId !== reqUser.companyId) {
+    throw new Error('Cycle count not found');
+  }
+
+  // data.products = [{ productId, countedQty }]
+  const products = Array.isArray(data.products) ? data.products : [];
+  let discrepancies = 0;
+  let itemsCount = 0;
+
+  const transaction = await sequelize.transaction();
+  try {
+    for (const p of products) {
+      const pid = p.productId;
+      const counted = parseFloat(p.countedQty) || 0;
+      itemsCount++;
+
+      // Find current system stock
+      // We assume CycleCount is for a specific location (count.locationId)
+      // If count.locationId is null, it might be a "Whole Warehouse" or "Spot" count?
+      // For simplicity, if locationId is present, we adjust stock AT THAT LOCATION.
+      // If locationId is NULL, we might skip or fail? 
+      // The UI requires locationId for creating cycle count usually, or it's optional?
+      // In createCycleCount it says locationId || null.
+      // If null, we can't easily auto-adjust stock because we don't know WHERE.
+      // Let's assume locationId is REQUIRED for auto-adjustment for now, or throw error if missing.
+
+      if (!count.locationId) {
+        // If no location, we can't auto-adjust specific records. Just complete the count.
+        continue;
+      }
+
+      // Find stock at this location
+      // Note: A product might have multiple stocks at same location if Batches exist.
+      // This logic is tricky if batches exist.
+      // Simplified: We sum up all batches at this location for this product to compare?
+      // usage: "Blind Count". User counts 10 units of Product A. System says 8.
+      // We need to adjust. Which batch? 
+      // If we don't support batch scanning in cycle count, we might default to no-batch or oldest batch?
+      // Or we just update the "No Batch" record?
+      // Let's try to find a stock record without batch first (or any).
+      // Ideally, the "Input" should specify Batch if relevant.
+      // For now, let's assume standard stock (null batch) or generic adjustment.
+
+      const where = {
+        productId: pid,
+        locationId: count.locationId,
+        warehouseId: (await (require('../models').Location).findByPk(count.locationId)).warehouseId
+      };
+
+      // Aggregated check if multiple batches?
+      // For this implementation, let's match exact batch if provided in input, else match 'null' batch?
+      // Or simpler: The user input should ideally match existing structure.
+      // Let's stick to: Update Total Quantity at Location. 
+      // If multiple batches exist, this gets complex. 
+      // Plan: If Multiple Batches, we can't easily guess. 
+      // For this fix: Assume non-batched or user selects 'No Batch'.
+      // If user sends batchId/Number, use it.
+
+      if (p.batchNumber) where.batchNumber = p.batchNumber;
+
+      let stock = await ProductStock.findOne({ where, transaction });
+      const systemQty = stock ? stock.quantity : 0;
+      const diff = counted - systemQty;
+
+      if (diff !== 0) {
+        discrepancies++;
+        // Create Adjustment
+        const type = diff > 0 ? 'INCREASE' : 'DECREASE';
+        const qty = Math.abs(diff);
+
+        await InventoryAdjustment.create({
+          referenceNumber: generateAdjustmentReference(),
+          companyId: count.companyId,
+          productId: pid,
+          warehouseId: where.warehouseId,
+          type,
+          quantity: qty,
+          reason: `Cycle Count #${count.referenceNumber}`,
+          notes: 'Auto-adjustment from cycle count',
+          status: 'COMPLETED',
+          createdBy: reqUser.id
+        }, { transaction });
+
+        // Update Stock
+        if (stock) {
+          await stock.increment('quantity', { by: diff, transaction });
+        } else if (diff > 0) {
+          await ProductStock.create({
+            ...where,
+            quantity: diff,
+            status: 'ACTIVE'
+          }, { transaction });
+        }
+      }
+    }
+
+    await count.update({
+      status: 'COMPLETED',
+      itemsCount,
+      discrepancies,
+      countedBy: reqUser.id
+    }, { transaction });
+
+    await transaction.commit();
+    return CycleCount.findByPk(id, {
+      include: [
+        { association: 'Location' },
+        { association: 'countedByUser' }
+      ]
+    });
+
+  } catch (err) {
+    await transaction.rollback();
+    throw err;
+  }
+}
+
+async function listBatches(reqUser, query = {}) {
+  const where = {};
+  if (reqUser.role !== 'super_admin') where.companyId = reqUser.companyId;
+  if (query.status) where.status = query.status;
+  if (query.productId) where.productId = query.productId;
+  if (query.warehouseId) where.warehouseId = query.warehouseId;
+  if (query.search) {
+    where[Op.or] = [
+      { batchNumber: { [Op.like]: `%${query.search}%` } },
+    ];
+  }
+  const list = await Batch.findAll({
+    where,
+    order: [['receivedDate', 'DESC'], ['createdAt', 'DESC']],
+    include: [
+      { association: 'Product', attributes: ['id', 'name', 'sku'] },
+      { association: 'Warehouse', attributes: ['id', 'name', 'code'] },
+      { association: 'Location', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'Supplier', required: false, attributes: ['id', 'name', 'code'] },
+    ],
+  });
+  return list.map((b) => {
+    const j = b.toJSON();
+    j.availableQuantity = Math.max(0, (b.quantity || 0) - (b.reserved || 0));
+    return j;
+  });
+}
+
+async function createBatch(data, reqUser) {
+  if (reqUser.role !== 'super_admin' && reqUser.role !== 'company_admin' && reqUser.role !== 'inventory_manager' && reqUser.role !== 'warehouse_manager') {
+    throw new Error('Not allowed to create batch');
+  }
+  const companyId = reqUser.companyId || data.companyId;
+  if (!companyId) throw new Error('Company context required');
+  const product = await Product.findByPk(data.productId);
+  if (!product) throw new Error('Product not found');
+  if (product.companyId !== companyId && reqUser.role !== 'super_admin') throw new Error('Product not found');
+  /* 
+   * [MODIFIED] Now also creates/updates ProductStock so batch inventory is live.
+   */
+  const batch = await Batch.create({
+    companyId,
+    batchNumber: data.batchNumber || String(Date.now()),
+    productId: data.productId,
+    warehouseId: data.warehouseId,
+    locationId: data.locationId || null,
+    quantity: parseFloat(data.quantity) || 0,
+    reserved: 0,
+    unitCost: data.unitCost != null ? parseFloat(data.unitCost) : null,
+    receivedDate: data.receivedDate || null,
+    expiryDate: data.expiryDate || null,
+    manufacturingDate: data.manufacturingDate || null,
+    supplierId: data.supplierId || null,
+    status: 'ACTIVE',
+  });
+
+  if (batch.quantity > 0 && batch.warehouseId) {
+    const warehouseService = require('./warehouseService');
+    await warehouseService.validateCapacity(batch.warehouseId, batch.quantity);
+  }
+
+  // Sync with ProductStock if quantity > 0
+  if (batch.quantity > 0) {
+    const stockQty = batch.quantity;
+    const stockWhere = {
+      productId: batch.productId,
+      warehouseId: batch.warehouseId,
+      locationId: batch.locationId || null,
+      batchNumber: batch.batchNumber,
+    };
+
+    // Check if stock exists matching this batch
+    let stock = await ProductStock.findOne({ where: stockWhere });
+    if (stock) {
+      await stock.increment('quantity', { by: stockQty });
+    } else {
+      await ProductStock.create({
+        ...stockWhere,
+        quantity: stockQty,
+        reserved: 0,
+        status: 'ACTIVE',
+        expiryDate: batch.expiryDate, // Sync expiry if possible, though model might need update
+      });
+    }
+  }
+
+  return getBatchById(batch.id, reqUser);
+}
+
+async function getBatchById(id, reqUser) {
+  const batch = await Batch.findByPk(id, {
+    include: [
+      { association: 'Product', attributes: ['id', 'name', 'sku'] },
+      { association: 'Warehouse', attributes: ['id', 'name', 'code'] },
+      { association: 'Location', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'Supplier', required: false, attributes: ['id', 'name', 'code'] },
+    ],
+  });
+  if (!batch) throw new Error('Batch not found');
+  if (reqUser.role !== 'super_admin' && batch.companyId !== reqUser.companyId) throw new Error('Batch not found');
+  const j = batch.toJSON();
+  j.availableQuantity = Math.max(0, (batch.quantity || 0) - (batch.reserved || 0));
+  return j;
+}
+
+async function updateBatch(id, data, reqUser) {
+  const batch = await Batch.findByPk(id, { include: ['Product'] });
+  if (!batch) throw new Error('Batch not found');
+  if (reqUser.role !== 'super_admin' && batch.companyId !== reqUser.companyId) throw new Error('Batch not found');
+  await batch.update({
+    batchNumber: data.batchNumber !== undefined ? data.batchNumber : batch.batchNumber,
+    locationId: data.locationId !== undefined ? data.locationId : batch.locationId,
+    quantity: data.quantity !== undefined ? parseFloat(data.quantity) : batch.quantity,
+    unitCost: data.unitCost !== undefined ? (data.unitCost == null ? null : parseFloat(data.unitCost)) : batch.unitCost,
+    receivedDate: data.receivedDate !== undefined ? data.receivedDate : batch.receivedDate,
+    expiryDate: data.expiryDate !== undefined ? data.expiryDate : batch.expiryDate,
+    manufacturingDate: data.manufacturingDate !== undefined ? data.manufacturingDate : batch.manufacturingDate,
+    supplierId: data.supplierId !== undefined ? data.supplierId : batch.supplierId,
+    status: data.status !== undefined ? data.status : batch.status,
+  });
+  return getBatchById(batch.id, reqUser);
+}
+
+async function removeBatch(id, reqUser) {
+  const batch = await Batch.findByPk(id);
+  if (!batch) throw new Error('Batch not found');
+  if (reqUser.role !== 'super_admin' && batch.companyId !== reqUser.companyId) throw new Error('Batch not found');
+  await batch.destroy();
+  return { message: 'Batch deleted' };
+}
+
+async function listMovements(reqUser, query = {}) {
+  const where = {};
+  if (reqUser.role !== 'super_admin') where.companyId = reqUser.companyId;
+  if (query.type) where.type = query.type;
+  if (query.startDate || query.endDate) {
+    const dateCond = {};
+    if (query.startDate) dateCond[Op.gte] = new Date(query.startDate + 'T00:00:00');
+    if (query.endDate) dateCond[Op.lte] = new Date(query.endDate + 'T23:59:59');
+    where.createdAt = dateCond;
+  }
+  const list = await Movement.findAll({
+    where,
+    order: [['createdAt', 'DESC']],
+    include: [
+      { association: 'Product', attributes: ['id', 'name', 'sku'] },
+      { association: 'Batch', required: false, attributes: ['id', 'batchNumber'] },
+      { association: 'fromLocation', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'toLocation', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'createdByUser', required: false, attributes: ['id', 'name', 'email'] },
+      { association: 'Warehouse', required: false, attributes: ['id', 'name', 'code'] },
+    ],
+  });
+  return list.map((m) => {
+    const j = m.toJSON();
+    j.user = j.createdByUser;
+    delete j.createdByUser;
+    return j;
+  });
+}
+async function createMovement(data, reqUser) {
+  if (reqUser.role !== 'super_admin' && reqUser.role !== 'company_admin' && reqUser.role !== 'inventory_manager' && reqUser.role !== 'warehouse_manager') {
+    throw new Error('Not allowed to create movement');
+  }
+  const companyId = reqUser.companyId || data.companyId;
+  if (!companyId) throw new Error('Company context required');
+
+  let productId = data.productId;
+  if (!productId && (data.sku || data.barcode || data.productSku)) {
+    const searchTerm = (data.sku || data.barcode || data.productSku || '').trim();
+    if (searchTerm) {
+      const p = await Product.findOne({
+        where: {
+          companyId: companyId,
+          [Op.or]: [
+            { sku: searchTerm },
+            { barcode: searchTerm },
+            sequelize.where(
+              sequelize.fn('JSON_CONTAINS', sequelize.col('alternative_skus'), JSON.stringify(searchTerm)),
+              1
+            )
+          ]
+        }
+      });
+      if (p) productId = p.id;
+    }
+  }
+
+  if (!productId) throw new Error('Product not found');
+  const product = await Product.findByPk(productId);
+  if (!product) throw new Error('Product not found');
+  if (product.companyId !== companyId && reqUser.role !== 'super_admin') throw new Error('Product not found');
+
+  const qty = parseFloat(data.quantity) || 0;
+  if (qty <= 0) throw new Error('Quantity must be greater than 0');
+
+  const type = data.type || 'TRANSFER';
+  const batchId = data.batchId || null;
+  let batchNumber = null;
+
+  if (batchId) {
+    const b = await Batch.findByPk(batchId);
+    if (b) batchNumber = b.batchNumber;
+  }
+
+  let fromLocationId = data.fromLocationId;
+  let toLocationId = data.toLocationId;
+
+  // Lookup locations by name/code if IDs are missing but names are provided
+  if (!fromLocationId && data.fromLocation) {
+    const loc = await (require('../models').Location).findOne({
+      where: {
+        [Op.or]: [{ name: data.fromLocation }, { code: data.fromLocation }],
+        companyId: companyId
+      }
+    });
+    if (loc) fromLocationId = loc.id;
+  }
+  if (!toLocationId && (data.toLocation || data.toLocationId)) {
+    const loc = await (require('../models').Location).findOne({
+      where: {
+        [Op.or]: [{ name: data.toLocation || data.toLocationId }, { code: data.toLocation || data.toLocationId }],
+        companyId: companyId
+      }
+    });
+    if (loc) toLocationId = loc.id;
+  }
+
+  // Fallback to default location if still missing for TRANSFER or RECEIVE
+  if ((type === 'TRANSFER' || type === 'RECEIVE') && !toLocationId) {
+    const warehouseService = require('./warehouseService');
+    const defLoc = await warehouseService.getDefaultLocation(companyId);
+    if (defLoc) toLocationId = defLoc.id;
+  }
+  if ((type === 'TRANSFER' || type === 'PICK') && !fromLocationId) {
+    // For pick/transfer, we might need to find WHERE the product actually is
+    const { ProductStock } = require('../models');
+    const stock = await ProductStock.findOne({ where: { productId: productId }, order: [['quantity', 'DESC']] });
+    if (stock) fromLocationId = stock.locationId;
+  }
+
+  const transaction = await sequelize.transaction();
+
+  try {
+    // 1. Log the Movement
+    const movement = await Movement.create({
+      companyId,
+      type,
+      productId,
+      batchId,
+      fromLocationId: data.fromLocationId || null,
+      toLocationId: data.toLocationId || null,
+      quantity: qty,
+      reason: data.reason || null,
+      notes: data.notes || null,
+      createdBy: reqUser.id,
+    }, { transaction });
+
+    // 2. Adjust Stock based on Type
+    const addStock = async (locId, q, batchNum) => {
+      if (!locId) throw new Error('Destination location required');
+      const loc = await (require('../models').Location).findByPk(locId);
+      if (!loc) throw new Error(`Location ${locId} not found`);
+
+      const warehouseService = require('./warehouseService');
+      await warehouseService.validateCapacity(loc.warehouseId, q, { transaction });
+
+      const where = {
+        productId,
+        warehouseId: loc.warehouseId,
+        locationId: locId,
+        batchNumber: batchNum || null
+      };
+
+      let stock = await ProductStock.findOne({ where, transaction });
+      if (stock) {
+        await stock.increment('quantity', { by: q, transaction });
+      } else {
+        await ProductStock.create({
+          ...where,
+          quantity: q,
+          status: 'ACTIVE'
+        }, { transaction });
+      }
+    };
+
+    const removeStock = async (locId, q, batchNum) => {
+      if (!locId) throw new Error('Source location required');
+      const loc = await (require('../models').Location).findByPk(locId);
+      if (!loc) throw new Error(`Location ${locId} not found`);
+
+      const where = {
+        productId,
+        warehouseId: loc.warehouseId,
+        locationId: locId,
+        batchNumber: batchNum || null
+      };
+
+      const stock = await ProductStock.findOne({ where, transaction });
+      if (!stock || (stock.quantity < q)) {
+        throw new Error(`Insufficient stock at location ${loc.name || loc.code}`);
+      }
+      await stock.decrement('quantity', { by: q, transaction });
+    };
+
+    if (type === 'RECEIVE' || type === 'RETURN') {
+      await addStock(data.toLocationId, qty, batchNumber);
+    }
+    else if (type === 'PICK') {
+      await removeStock(data.fromLocationId, qty, batchNumber);
+    }
+    else if (type === 'TRANSFER') {
+      await removeStock(data.fromLocationId, qty, batchNumber);
+      await addStock(data.toLocationId, qty, batchNumber);
+    }
+
+    await transaction.commit();
+    return getMovementById(movement.id, reqUser);
+
+  } catch (err) {
+    await transaction.rollback();
+    throw err;
+  }
+}
+
+async function getMovementById(id, reqUser) {
+  const movement = await Movement.findByPk(id, {
+    include: [
+      { association: 'Product', attributes: ['id', 'name', 'sku'] },
+      { association: 'Batch', required: false, attributes: ['id', 'batchNumber'] },
+      { association: 'fromLocation', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'toLocation', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'createdByUser', required: false, attributes: ['id', 'name', 'email'] },
+    ],
+  });
+  if (!movement) throw new Error('Movement not found');
+  if (reqUser.role !== 'super_admin' && movement.companyId !== reqUser.companyId) throw new Error('Movement not found');
+  const j = movement.toJSON();
+  j.user = j.createdByUser;
+  delete j.createdByUser;
+  return j;
+}
+
+async function updateMovement(id, data, reqUser) {
+  const movement = await Movement.findByPk(id);
+  if (!movement) throw new Error('Movement not found');
+  if (reqUser.role !== 'super_admin' && movement.companyId !== reqUser.companyId) throw new Error('Movement not found');
+  await movement.update({
+    type: data.type !== undefined ? data.type : movement.type,
+    batchId: data.batchId !== undefined ? data.batchId : movement.batchId,
+    fromLocationId: data.fromLocationId !== undefined ? data.fromLocationId : movement.fromLocationId,
+    toLocationId: data.toLocationId !== undefined ? data.toLocationId : movement.toLocationId,
+    quantity: data.quantity !== undefined ? parseFloat(data.quantity) : movement.quantity,
+    reason: data.reason !== undefined ? data.reason : movement.reason,
+    notes: data.notes !== undefined ? data.notes : movement.notes,
+  });
+  return getMovementById(movement.id, reqUser);
+}
+
+async function removeMovement(id, reqUser) {
+  const movement = await Movement.findByPk(id);
+  if (!movement) throw new Error('Movement not found');
+  if (reqUser.role !== 'super_admin' && movement.companyId !== reqUser.companyId) throw new Error('Movement not found');
+
+  const transaction = await sequelize.transaction();
+  try {
+    const { ProductStock } = require('../models');
+
+    // Revert logic based on type
+    const revertAdd = async (locId, q, batchNo) => {
+      const stock = await ProductStock.findOne({
+        where: { productId: movement.productId, locationId: locId, batchNumber: batchNo || null },
+        transaction
+      });
+      if (stock) await stock.decrement('quantity', { by: q, transaction });
+    };
+
+    const revertRemove = async (locId, q, batchNo) => {
+      const stock = await ProductStock.findOne({
+        where: { productId: movement.productId, locationId: locId, batchNumber: batchNo || null },
+        transaction
+      });
+      if (stock) await stock.increment('quantity', { by: q, transaction });
+    };
+
+    if (movement.type === 'RECEIVE' || movement.type === 'RETURN') {
+      await revertAdd(movement.toLocationId, movement.quantity, movement.batchNumber);
+    } else if (movement.type === 'PICK') {
+      await revertRemove(movement.fromLocationId, movement.quantity, movement.batchNumber);
+    } else if (movement.type === 'TRANSFER') {
+      await revertRemove(movement.fromLocationId, movement.quantity, movement.batchNumber);
+      await revertAdd(movement.toLocationId, movement.quantity, movement.batchNumber);
+    }
+
+    await movement.destroy({ transaction });
+    await transaction.commit();
+    return { message: 'Movement deleted and stock reverted' };
+  } catch (err) {
+    await transaction.rollback();
+    throw err;
+  }
+}
+
+module.exports = {
+  listProducts,
+  listCategories,
+  getProductById,
+  createProduct,
+  bulkCreateProducts,
+  updateProduct,
+  addAlternativeSku,
+  removeProduct,
+  createCategory,
+  updateCategory,
+  removeCategory,
+  listStock,
+  createStock,
+  updateStock,
+  removeStock,
+  listStockByBestBeforeDate,
+  listStockByLocation,
+  listAdjustments,
+  createAdjustment,
+  removeAdjustment,
+  listCycleCounts,
+  createCycleCount,
+  completeCycleCount,
+  listBatches,
+  createBatch,
+  getBatchById,
+  updateBatch,
+  removeBatch,
+  listMovements,
+  createMovement,
+  getMovementById,
+  updateMovement,
+  removeMovement,
+};
