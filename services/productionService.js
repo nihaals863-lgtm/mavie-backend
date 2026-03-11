@@ -10,6 +10,7 @@ const {
     sequelize
 } = require('../models');
 const { Op } = require('sequelize');
+const { convert } = require('../utils/unitConverter');
 
 async function list(user, query = {}) {
     const { status, productionAreaId } = query;
@@ -122,19 +123,33 @@ async function validateStock(orderId, user, transaction = null) {
 
     const stockChecks = [];
     for (const item of order.ProductionOrderItems) {
+        // Find product to get its base unit
+        const product = await Product.findByPk(item.productId, { transaction });
+        const productUnit = product?.unitOfMeasure || 'units';
+
+        const targetWarehouseId = item.warehouseId || order.warehouseId;
         const stock = await ProductStock.sum('quantity', {
             where: {
                 productId: item.productId,
-                warehouseId: item.warehouseId || order.warehouseId
+                warehouseId: targetWarehouseId,
+                status: 'ACTIVE'
             },
             transaction
         }) || 0;
 
+        // Convert stock to requirement unit for comparison
+        const availableInReqUnit = convert(parseFloat(stock), productUnit, item.unit);
+
         stockChecks.push({
             productId: item.productId,
+            name: product?.name || 'Unknown',
             required: parseFloat(item.quantityRequired),
-            available: parseFloat(stock),
-            isAvailable: parseFloat(stock) >= parseFloat(item.quantityRequired)
+            available: availableInReqUnit,
+            availableOriginal: parseFloat(stock),
+            unit: item.unit,
+            productUnit: productUnit,
+            warehouseId: targetWarehouseId,
+            isAvailable: availableInReqUnit >= parseFloat(item.quantityRequired)
         });
     }
 
@@ -157,9 +172,24 @@ async function validateStock(orderId, user, transaction = null) {
 /**
  * Helper to adjust stock for production movements
  */
-async function adjustStock(companyId, userId, productId, warehouseId, qty, reason, orderId, transaction) {
-    const isIncrease = qty > 0;
-    const absQty = Math.abs(qty);
+/**
+ * Helper to adjust stock for production movements
+ * @param {number} qty - Quantity in specified unit
+ * @param {string} unit - Unit of the quantity parameter
+ */
+async function adjustStock(companyId, userId, productId, warehouseId, qty, unit, reason, orderId, transaction) {
+    const product = await Product.findByPk(productId, { transaction });
+    if (!product) throw new Error('Product not found');
+    const productUnit = product.unitOfMeasure || 'units';
+
+    // Convert qty from specified unit to product base unit
+    const convertedQty = convert(qty, unit, productUnit);
+
+    const isIncrease = convertedQty > 0;
+    const absQty = Math.abs(convertedQty);
+    const originalAbsQty = Math.abs(qty); // For logging in original unit if needed
+
+    const adjustmentReason = `${reason} (${originalAbsQty} ${unit})`;
 
     // 1. Create Adjustment Record
     await InventoryAdjustment.create({
@@ -169,7 +199,7 @@ async function adjustStock(companyId, userId, productId, warehouseId, qty, reaso
         warehouseId,
         type: isIncrease ? 'INCREASE' : 'DECREASE',
         quantity: absQty,
-        reason,
+        reason: adjustmentReason,
         status: 'COMPLETED',
         createdBy: userId
     }, { transaction });
@@ -185,8 +215,7 @@ async function adjustStock(companyId, userId, productId, warehouseId, qty, reaso
             await stock.increment('quantity', { by: absQty, transaction });
         } else {
             if (parseFloat(stock.quantity) < absQty) {
-                const p = await Product.findByPk(productId);
-                throw new Error(`Insufficient stock for ${p?.name || productId} in warehouse ${warehouseId}`);
+                throw new Error(`Insufficient stock for ${product.name} in warehouse ${warehouseId}. Required: ${absQty} ${productUnit}, Available: ${stock.quantity} ${productUnit}`);
             }
             await stock.decrement('quantity', { by: absQty, transaction });
         }
@@ -208,7 +237,7 @@ async function adjustStock(companyId, userId, productId, warehouseId, qty, reaso
         productId,
         warehouseId,
         quantity: absQty,
-        reason,
+        reason: adjustmentReason,
         createdBy: userId
     }, { transaction });
 }
@@ -251,6 +280,7 @@ async function startProduction(orderId, user) {
                 item.productId,
                 item.warehouseId,
                 -parseFloat(item.quantityRequired),
+                item.unit,
                 `Consumed for Production Order #${order.id}`,
                 order.id,
                 t
@@ -290,6 +320,7 @@ async function complete(orderId, user) {
                     item.productId,
                     item.warehouseId,
                     -parseFloat(item.quantityRequired || 0),
+                    item.unit,
                     `Consumed for Production Order #${order.id} (Auto-deducted at completion)`,
                     order.id,
                     t
@@ -304,6 +335,7 @@ async function complete(orderId, user) {
             order.productId,
             order.warehouseId,
             parseFloat(order.quantityGoal),
+            order.Product?.unitOfMeasure || 'PCS',
             `Produced from Production Order #${order.id}`,
             order.id,
             t

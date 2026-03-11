@@ -25,7 +25,7 @@ async function login(email, password) {
   if (!user) return null;
   const valid = await comparePassword(password, user.passwordHash);
   if (!valid) return null;
-  const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+  const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
   const u = user.toJSON();
   delete u.passwordHash;
   return { user: u, token };
