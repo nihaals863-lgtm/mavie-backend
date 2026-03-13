@@ -1,4 +1,4 @@
-const { Product, Category, ProductStock, Warehouse, Company, Supplier, InventoryAdjustment, CycleCount, Batch, Movement, sequelize } = require('../models');
+const { Product, Category, ProductStock, Warehouse, Company, Supplier, InventoryAdjustment, CycleCount, Batch, Movement, Bundle, BundleItem, sequelize } = require('../models');
 const { Op } = require('sequelize');
 
 /** Ensure product JSON fields from API are proper objects/arrays (e.g. SQLite may return strings) */
@@ -738,6 +738,107 @@ async function createAdjustment(data, reqUser) {
     await warehouseService.validateCapacity(warehouseId, qty);
   }
 
+  // [BUNDLE LOGIC] If product is a bundle, we check and adjust components instead
+  if (product.productType === 'BUNDLE') {
+    const bundle = await Bundle.findOne({
+      where: { sku: product.sku, companyId: product.companyId },
+      include: [{ model: BundleItem }]
+    });
+
+    if (!bundle || !bundle.BundleItems?.length) {
+      throw new Error('Bundle parts not linked. Please go to Products > Bundles and link components for this SKU.');
+    }
+
+    if (type === 'DECREASE') {
+      // Validation: Check if all components have enough stock
+      for (const bItem of bundle.BundleItems) {
+        const pStock = await ProductStock.findOne({ where: { productId: bItem.productId } });
+        const needed = Number(bItem.quantity) * qty;
+        if (!pStock || (Number(pStock.quantity) - Number(pStock.reserved)) < needed) {
+           const part = await Product.findByPk(bItem.productId);
+           throw new Error(`Insufficient stock for component: ${part?.name || bItem.productId}`);
+        }
+      }
+    }
+
+    const adjustment = await InventoryAdjustment.create({
+      referenceNumber,
+      companyId: effectiveCompanyId,
+      productId: productId,
+      warehouseId: warehouseId || null,
+      type,
+      quantity: qty,
+      reason: data.reason || 'Bundle Adjustment',
+      notes: data.notes || null,
+      status: 'COMPLETED',
+      createdBy: reqUser.id,
+    });
+
+    // [RECURSIVE HELPER]
+    const recursiveAdjustComponentStock = async (pid, targetQty) => {
+      const part = await Product.findByPk(pid);
+      if (!part) return;
+
+      if (part.productType === 'BUNDLE') {
+        const subBundle = await Bundle.findOne({
+          where: { sku: part.sku, companyId: part.companyId },
+          include: [{ model: BundleItem }]
+        });
+        if (subBundle && subBundle.BundleItems?.length) {
+          for (const sItem of subBundle.BundleItems) {
+             await recursiveAdjustComponentStock(sItem.productId, Number(sItem.quantity) * targetQty);
+          }
+        }
+      } else {
+        // Standard Part
+        let pStock = await ProductStock.findOne({ where: { productId: pid } });
+        if (pStock) {
+          if (type === 'INCREASE') await pStock.increment('quantity', { by: targetQty });
+          else await pStock.decrement('quantity', { by: targetQty });
+        } else if (type === 'INCREASE') {
+          await ProductStock.create({
+            productId: pid,
+            warehouseId: warehouseId || 1,
+            quantity: targetQty,
+            status: 'ACTIVE'
+          });
+        }
+
+        await Movement.create({
+          companyId: effectiveCompanyId,
+          type: type,
+          productId: pid,
+          warehouseId: pStock?.warehouseId || warehouseId || null,
+          quantity: targetQty,
+          reason: `Bundle Adjustment (${product.name})`,
+          notes: `Reference: ${referenceNumber}`,
+          createdBy: reqUser.id,
+        });
+      }
+    };
+
+    // Update component stocks and log movements
+    for (const bItem of bundle.BundleItems) {
+      await recursiveAdjustComponentStock(bItem.productId, Number(bItem.quantity) * qty);
+    }
+
+    return InventoryAdjustment.findByPk(adjustment.id, {
+      include: [
+        { association: 'Product', attributes: ['id', 'name', 'sku'] },
+        { association: 'Warehouse', required: false, attributes: ['id', 'name'] },
+        { association: 'createdByUser', required: false, attributes: ['id', 'name', 'email'] },
+      ]
+    }).then(a => {
+      const j = a.toJSON();
+      j.items = [{ product: j.Product, quantity: j.quantity }];
+      j.createdBy = j.createdByUser;
+      delete j.createdByUser;
+      delete j.Product;
+      return j;
+    });
+  }
+
+  // [REGULAR LOGIC] Standard product adjustment
   const stockWhere = { productId: productId };
   if (warehouseId) stockWhere.warehouseId = warehouseId;
   let stock = await ProductStock.findOne({ where: stockWhere });
@@ -771,7 +872,6 @@ async function createAdjustment(data, reqUser) {
       if (!firstWarehouse) throw new Error('No warehouse found for company');
       warehouseId = firstWarehouse.id;
     }
-    // Create new stock record if it doesn't exist for this warehouse
     await ProductStock.create({
       productId: productId,
       warehouseId,
@@ -781,10 +881,9 @@ async function createAdjustment(data, reqUser) {
   }
   await adjustment.update({ status: 'COMPLETED' });
 
-  // [NEW] Log as Movement for Live Stock feed
   await Movement.create({
     companyId: effectiveCompanyId,
-    type: type, // INCREASE or DECREASE
+    type: type,
     productId: productId,
     warehouseId: warehouseId || (stock && stock.warehouseId) || null,
     toLocationId: stock ? stock.locationId : null,
@@ -815,18 +914,58 @@ async function removeAdjustment(id, reqUser) {
   if (reqUser.role !== 'super_admin' && adj.companyId !== reqUser.companyId) throw new Error('Adjustment not found');
 
   // Revert stock change
-  const stock = await ProductStock.findOne({
-    where: {
-      productId: adj.productId,
-      warehouseId: adj.warehouseId || null
-    }
-  });
+  const product = await Product.findByPk(adj.productId);
 
-  if (stock) {
-    if (adj.type === 'INCREASE') {
-      await stock.decrement('quantity', { by: adj.quantity });
+  const recursiveRevertComponentStock = async (pid, targetQty) => {
+    const part = await Product.findByPk(pid);
+    if (!part) return;
+
+    if (part.productType === 'BUNDLE') {
+      const subBundle = await Bundle.findOne({
+        where: { sku: part.sku, companyId: part.companyId },
+        include: [{ model: BundleItem }]
+      });
+      if (subBundle && subBundle.BundleItems?.length) {
+        for (const sItem of subBundle.BundleItems) {
+           await recursiveRevertComponentStock(sItem.productId, Number(sItem.quantity) * targetQty);
+        }
+      }
     } else {
-      await stock.increment('quantity', { by: adj.quantity });
+      // Standard Part
+      const pStock = await ProductStock.findOne({ where: { productId: pid } });
+      if (pStock) {
+        if (adj.type === 'INCREASE') await pStock.decrement('quantity', { by: targetQty });
+        else await pStock.increment('quantity', { by: targetQty });
+      }
+    }
+  };
+  
+  if (product && product.productType === 'BUNDLE') {
+    const bundle = await Bundle.findOne({
+      where: { sku: product.sku, companyId: product.companyId },
+      include: [{ model: BundleItem }]
+    });
+
+    if (bundle && bundle.BundleItems?.length) {
+      for (const bItem of bundle.BundleItems) {
+        await recursiveRevertComponentStock(bItem.productId, Number(bItem.quantity) * Number(adj.quantity));
+      }
+    }
+  } else {
+    // Regular product revert
+    const stock = await ProductStock.findOne({
+      where: {
+        productId: adj.productId,
+        warehouseId: adj.warehouseId || null
+      }
+    });
+
+    if (stock) {
+      if (adj.type === 'INCREASE') {
+        await stock.decrement('quantity', { by: adj.quantity });
+      } else {
+        await stock.increment('quantity', { by: adj.quantity });
+      }
     }
   }
 

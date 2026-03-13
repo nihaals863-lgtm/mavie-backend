@@ -1,4 +1,4 @@
-const { Shipment, SalesOrder, OrderItem, PickList, ProductStock, User, Company, Warehouse } = require('../models');
+const { Shipment, SalesOrder, OrderItem, PickList, ProductStock, User, Company, Warehouse, Product, Bundle, BundleItem } = require('../models');
 const { Op } = require('sequelize');
 
 async function list(reqUser, query = {}) {
@@ -94,37 +94,31 @@ async function update(id, data, reqUser) {
       const pid = Number(item.productId) || 0;
       const qty = Number(item.quantity) || 0;
       if (!pid || qty <= 0) continue;
+
       try {
-        let stock = null;
-        const pickList = await PickList.findOne({ where: { salesOrderId: order.id }, attributes: ['warehouseId'] });
-        if (pickList && pickList.warehouseId) {
-          stock = await ProductStock.findOne({ where: { productId: pid, warehouseId: pickList.warehouseId } });
-        }
-        if (!stock && order.companyId) {
-          const companyWarehouses = await Warehouse.findAll({ where: { companyId: order.companyId }, attributes: ['id'] });
-          const warehouseIds = (companyWarehouses || []).map((w) => w.id);
-          if (warehouseIds.length > 0) {
-            stock = await ProductStock.findOne({
-              where: { productId: pid, warehouseId: { [Op.in]: warehouseIds } },
-            });
-          }
-        }
-        if (!stock) {
-          stock = await ProductStock.findOne({ where: { productId: pid } });
-        }
-        if (stock) {
-          const prevQty = Number(stock.quantity) || 0;
-          const prevRes = Number(stock.reserved) || 0;
-          const deductQty = Math.min(qty, prevQty);
-          if (deductQty > 0) {
-            await stock.decrement('quantity', { by: deductQty });
-            // Explicitly touch updatedAt for "Last Movement" tracking
-            await stock.update({ updatedAt: new Date() });
-            const newRes = Math.max(0, prevRes - deductQty);
-            if (newRes !== prevRes) await stock.update({ reserved: newRes });
+        const product = await Product.findByPk(pid);
+        if (!product) continue;
+
+        // Bundle logic: if product is a bundle, deduct parts
+        if (product.productType === 'BUNDLE') {
+          const bundle = await Bundle.findOne({
+            where: { sku: product.sku, companyId: product.companyId },
+            include: [{ model: BundleItem }]
+          });
+          if (bundle && bundle.BundleItems?.length) {
+            for (const bItem of bundle.BundleItems) {
+              const partPid = bItem.productId;
+              const partQty = Number(bItem.quantity) * qty;
+              await deductProductStock(partPid, partQty, order.companyId, order.id);
+            }
             deductionCount++;
+            continue; // Skip main product deduction for bundles
           }
         }
+
+        // Regular product deduction
+        const success = await deductProductStock(pid, qty, order.companyId, order.id);
+        if (success) deductionCount++;
       } catch (err) {
         console.error('Shipment stock deduct failed for product', pid, err.message);
       }
@@ -161,33 +155,29 @@ async function deductStockForShipment(shipmentId, reqUser) {
     const pid = Number(item.productId ?? item.product_id) || 0;
     const qty = Number(item.quantity) || 0;
     if (!pid || qty <= 0) continue;
+
     try {
-      let stock = null;
-      const pickList = await PickList.findOne({ where: { salesOrderId: order.id }, attributes: ['warehouseId'] });
-      if (pickList && pickList.warehouseId) {
-        stock = await ProductStock.findOne({ where: { productId: pid, warehouseId: pickList.warehouseId } });
-      }
-      if (!stock && order.companyId) {
-        const companyWarehouses = await Warehouse.findAll({ where: { companyId: order.companyId }, attributes: ['id'] });
-        const warehouseIds = (companyWarehouses || []).map((w) => w.id);
-        if (warehouseIds.length > 0) {
-          stock = await ProductStock.findOne({ where: { productId: pid, warehouseId: { [Op.in]: warehouseIds } } });
-        }
-      }
-      if (!stock) stock = await ProductStock.findOne({ where: { productId: pid } });
-      if (stock) {
-        const prevQty = Number(stock.quantity) || 0;
-        const prevRes = Number(stock.reserved) || 0;
-        const deductQty = Math.min(qty, prevQty);
-        if (deductQty > 0) {
-          await stock.decrement('quantity', { by: deductQty });
-          // Explicitly touch updatedAt for "Last Movement" tracking
-          await stock.update({ updatedAt: new Date() });
-          const newRes = Math.max(0, prevRes - deductQty);
-          if (newRes !== prevRes) await stock.update({ reserved: newRes });
+      const product = await Product.findByPk(pid);
+      if (!product) continue;
+
+      if (product.productType === 'BUNDLE') {
+        const bundle = await Bundle.findOne({
+          where: { sku: product.sku, companyId: product.companyId },
+          include: [{ model: BundleItem }]
+        });
+        if (bundle && bundle.BundleItems?.length) {
+          for (const bItem of bundle.BundleItems) {
+            const partPid = bItem.productId;
+            const partQty = Number(bItem.quantity) * qty;
+            await deductProductStock(partPid, partQty, order.companyId, order.id);
+          }
           deducted += 1;
+          continue;
         }
       }
+
+      const success = await deductProductStock(pid, qty, order.companyId, order.id);
+      if (success) deducted += 1;
     } catch (err) {
       console.error('Deduct stock failed for product', pid, err.message);
     }
@@ -238,12 +228,32 @@ async function remove(id, reqUser) {
   // Revert stock if deducted
   if (shipment.stockDeducted && order) {
     const orderItems = await OrderItem.findAll({ where: { salesOrderId: order.id } });
-    for (const item of orderItems) {
-      const stock = await ProductStock.findOne({ where: { productId: item.productId } });
-      if (stock) {
-        await stock.increment('quantity', { by: item.quantity });
-        await stock.increment('reserved', { by: item.quantity });
+
+    const recursiveRevertShipmentStock = async (pid, targetQty) => {
+      const part = await Product.findByPk(pid);
+      if (!part) return;
+
+      if (part.productType === 'BUNDLE') {
+        const subBundle = await Bundle.findOne({
+          where: { sku: part.sku, companyId: part.companyId },
+          include: [{ model: BundleItem }]
+        });
+        if (subBundle && subBundle.BundleItems?.length) {
+          for (const sItem of subBundle.BundleItems) {
+            await recursiveRevertShipmentStock(sItem.productId, Number(sItem.quantity) * targetQty);
+          }
+        }
+      } else {
+        const stock = await ProductStock.findOne({ where: { productId: pid } });
+        if (stock) {
+          await stock.increment('quantity', { by: targetQty });
+          await stock.increment('reserved', { by: targetQty });
+        }
       }
+    };
+
+    for (const item of orderItems) {
+      await recursiveRevertShipmentStock(item.productId, Number(item.quantity));
     }
   }
 
@@ -255,4 +265,56 @@ async function remove(id, reqUser) {
   return { message: 'Shipment deleted and order reverted' };
 }
 
-module.exports = { list, getById, create, update, deductStockForShipment, prepareShipment, remove };
+async function deductProductStock(pid, qty, companyId, salesOrderId) {
+  const product = await Product.findByPk(pid);
+  if (!product) return false;
+
+  // RECURSIVE BUNDLE LOGIC
+  if (product.productType === 'BUNDLE') {
+    const bundle = await Bundle.findOne({
+      where: { sku: product.sku, companyId: product.companyId },
+      include: [{ model: BundleItem }]
+    });
+    if (bundle && bundle.BundleItems?.length) {
+      let allSuccess = true;
+      for (const bItem of bundle.BundleItems) {
+        const partQty = Number(bItem.quantity) * qty;
+        const res = await deductProductStock(bItem.productId, partQty, companyId, salesOrderId);
+        if (!res) allSuccess = false;
+      }
+      return allSuccess;
+    }
+    return false;
+  }
+
+  // REGULAR PRODUCT LOGIC
+  let stock = null;
+  const pickList = await PickList.findOne({ where: { salesOrderId }, attributes: ['warehouseId'] });
+  if (pickList && pickList.warehouseId) {
+    stock = await ProductStock.findOne({ where: { productId: pid, warehouseId: pickList.warehouseId } });
+  }
+  if (!stock && companyId) {
+    const companyWarehouses = await Warehouse.findAll({ where: { companyId }, attributes: ['id'] });
+    const warehouseIds = (companyWarehouses || []).map((w) => w.id);
+    if (warehouseIds.length > 0) {
+      stock = await ProductStock.findOne({ where: { productId: pid, warehouseId: { [Op.in]: warehouseIds } } });
+    }
+  }
+  if (!stock) stock = await ProductStock.findOne({ where: { productId: pid } });
+  
+  if (stock) {
+    const prevQty = Number(stock.quantity) || 0;
+    const prevRes = Number(stock.reserved) || 0;
+    const deductQty = Math.min(qty, prevQty);
+    if (deductQty > 0) {
+      await stock.decrement('quantity', { by: deductQty });
+      await stock.update({ updatedAt: new Date() });
+      const newRes = Math.max(0, prevRes - deductQty);
+      if (newRes !== prevRes) await stock.update({ reserved: newRes });
+      return true;
+    }
+  }
+  return false;
+}
+
+module.exports = { list, getById, create, update, deductStockForShipment, prepareShipment, remove, deductProductStock };

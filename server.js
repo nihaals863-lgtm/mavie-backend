@@ -201,7 +201,7 @@ async function start() {
         await queryInterface.addColumn('products', 'unit_of_measure', {
           type: require('sequelize').DataTypes.STRING,
           allowNull: true,
-          defaultValue: 'pcs',
+          defaultValue: 'EACH',
         });
         console.log('[Migration] Added unit_of_measure column to products table.');
       }
