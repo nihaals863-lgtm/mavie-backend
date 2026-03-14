@@ -59,6 +59,7 @@ async function create(data, reqUser) {
   const bundle = await Bundle.create({
     companyId,
     sku: (data.sku || '').trim(),
+    barcode: (data.barcode || '').trim() || null,
     name: data.name,
     description: data.description || null,
     costPrice: data.costPrice ?? 0,
@@ -80,6 +81,7 @@ async function update(id, data, reqUser) {
   await bundle.update({
     name: data.name ?? bundle.name,
     sku: data.sku !== undefined ? data.sku.trim() : bundle.sku,
+    barcode: data.barcode !== undefined ? (data.barcode || '').trim() || null : bundle.barcode,
     description: data.description !== undefined ? data.description : bundle.description,
     costPrice: data.costPrice !== undefined ? data.costPrice : bundle.costPrice,
     sellingPrice: data.sellingPrice !== undefined ? data.sellingPrice : bundle.sellingPrice,

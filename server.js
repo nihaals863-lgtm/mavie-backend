@@ -311,6 +311,23 @@ async function start() {
       console.warn('[Migration Warning] Could not update production_order_items:', err.message);
     }
 
+    // Safe migration: ensure barcode column exists in bundles
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('bundles');
+      if (!tableDescription.barcode) {
+        console.log('[Migration] Column barcode not found in bundles, attempting to add...');
+        await queryInterface.addColumn('bundles', 'barcode', {
+          type: require('sequelize').DataTypes.STRING,
+          allowNull: true,
+          defaultValue: null
+        });
+        console.log('[Migration] Added barcode column to bundles table.');
+      }
+    } catch (migrationErr) {
+      console.error('[Migration Error] Failure adding barcode to bundles:', migrationErr.message);
+    }
+
     // Safe migration: ensure quantities are DECIMAL across all tables
     try {
       const queryInterface = sequelize.getQueryInterface();

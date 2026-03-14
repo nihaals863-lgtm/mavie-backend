@@ -5,6 +5,7 @@ const Bundle = sequelize.define('Bundle', {
   id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
   companyId: { type: DataTypes.INTEGER, allowNull: false },
   sku: { type: DataTypes.STRING, allowNull: false },
+  barcode: { type: DataTypes.STRING, allowNull: true },
   name: { type: DataTypes.STRING, allowNull: false },
   description: { type: DataTypes.TEXT, allowNull: true },
   costPrice: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },

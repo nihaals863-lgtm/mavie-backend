@@ -50,7 +50,7 @@ async function listProducts(reqUser, query = {}) {
       { color: { [Op.like]: `%${query.search}%` } },
     ];
   }
-  const products = await Product.findAll({
+  let products = await Product.findAll({
     where,
     order: [['createdAt', 'DESC']],
     include: [
@@ -59,6 +59,51 @@ async function listProducts(reqUser, query = {}) {
       { association: 'ProductStocks', attributes: ['quantity', 'warehouseId'], required: false },
     ],
   });
+
+  // Fallback: If no products found or for autocomplete, search bundles too
+  if (query.search) {
+     const cleanSearch = query.search.trim();
+     const { Bundle } = require('../models');
+     
+     // Search for bundles that match the search term
+     const bundles = await Bundle.findAll({
+       where: {
+         companyId: where.companyId || { [Op.ne]: null },
+         [Op.or]: [
+           { sku: { [Op.like]: `%${cleanSearch}%` } },
+           { barcode: { [Op.like]: `%${cleanSearch}%` } },
+           { name: { [Op.like]: `%${cleanSearch}%` } }
+         ]
+       },
+       limit: 10
+     });
+
+     if (bundles.length > 0) {
+        const bundleSkus = bundles.map(b => b.sku);
+        const bundleProducts = await Product.findAll({
+          where: { 
+            sku: { [Op.in]: bundleSkus }, 
+            companyId: where.companyId || { [Op.ne]: null },
+            productType: 'BUNDLE'
+          },
+          include: [
+            { association: 'Category', attributes: ['id', 'name', 'code'], required: false },
+            { association: 'Company', attributes: ['id', 'name', 'code'], required: false },
+            { association: 'ProductStocks', attributes: ['quantity', 'warehouseId'], required: false },
+          ]
+        });
+
+        // Add to products list, avoiding duplicates if already found
+        const existingIds = new Set(products.map(p => p.id));
+        bundleProducts.forEach(bp => {
+           if (!existingIds.has(bp.id)) {
+              products.push(bp);
+              existingIds.add(bp.id);
+           }
+        });
+     }
+  }
+
   return products;
 }
 
@@ -428,6 +473,58 @@ async function listStock(reqUser, query = {}) {
       { association: 'Location', required: false },
     ],
   });
+
+  // [NEW] Calculate virtual stock for bundles
+  const companyId = reqUser.companyId;
+  if (companyId) {
+    const bundleWhere = { companyId, status: 'ACTIVE' };
+    if (query.sku) bundleWhere.sku = query.sku;
+    
+    const bundles = await Bundle.findAll({
+      where: bundleWhere,
+      include: [{ model: BundleItem }]
+    });
+
+    for (const b of bundles) {
+      const bProd = await Product.findOne({ 
+        where: { sku: b.sku, companyId, productType: 'BUNDLE' },
+        include: [{ association: 'Category', attributes: ['id', 'name'] }]
+      });
+      if (!bProd) continue;
+
+      if (query.productId && Number(query.productId) !== bProd.id) continue;
+
+      // Calculate min assembly quantity based on components
+      let minAssembly = Infinity;
+      if (!b.BundleItems || b.BundleItems.length === 0) minAssembly = 0;
+      else {
+        for (const item of b.BundleItems) {
+          const pStocks = await ProductStock.findAll({ where: { productId: item.productId } });
+          const avail = pStocks.reduce((sum, s) => sum + (Number(s.quantity || 0) - Number(s.reserved || 0)), 0);
+          const possible = Math.floor(avail / Number(item.quantity || 1));
+          if (possible < minAssembly) minAssembly = possible;
+        }
+      }
+      if (minAssembly === Infinity) minAssembly = 0;
+
+      // Add a virtual entry to the list
+      // We wrap it in a mock Sequelize-like object or just return as plain JSON later
+      const virtualRecord = {
+        id: `bundle-${b.id}`,
+        productId: bProd.id,
+        warehouseId: query.warehouseId || null,
+        quantity: minAssembly,
+        reserved: 0,
+        status: 'ACTIVE',
+        isVirtual: true,
+        Product: bProd.toJSON ? bProd.toJSON() : bProd,
+        Warehouse: query.warehouseId ? { name: 'Multiple/Virtual' } : null,
+        updatedAt: new Date()
+      };
+      stocks.push(virtualRecord);
+    }
+  }
+
   return stocks;
 }
 
@@ -692,16 +789,17 @@ async function createAdjustment(data, reqUser) {
   if (!companyId && role !== 'super_admin') throw new Error('Company context required');
 
   let productId = data.productId;
+
   if (!productId && (data.sku || data.barcode)) {
     const searchTerm = (data.sku || data.barcode || '').trim();
     if (searchTerm) {
+      // 1. Try standard product lookup (SKU/Barcode/Alt SKU)
       const p = await Product.findOne({
         where: {
           companyId: companyId,
           [Op.or]: [
             { sku: searchTerm },
             { barcode: searchTerm },
-            // Search in alternativeSkus JSON if applicable
             sequelize.where(
               sequelize.fn('JSON_CONTAINS', sequelize.col('alternative_skus'), JSON.stringify(searchTerm)),
               1
@@ -709,7 +807,16 @@ async function createAdjustment(data, reqUser) {
           ]
         }
       });
-      if (p) productId = p.id;
+      if (p) {
+        productId = p.id;
+      } else {
+        // 2. Fallback: Search in Bundle formulas for its specific barcode
+        const b = await Bundle.findOne({ where: { companyId, barcode: searchTerm } });
+        if (b) {
+          const bProd = await Product.findOne({ where: { sku: b.sku, companyId, productType: 'BUNDLE' } });
+          if (bProd) productId = bProd.id;
+        }
+      }
     }
   }
 
@@ -817,9 +924,12 @@ async function createAdjustment(data, reqUser) {
       }
     };
 
-    // Update component stocks and log movements
+    // [NEW] Get component details for feedback
+    const componentDetails = [];
     for (const bItem of bundle.BundleItems) {
       await recursiveAdjustComponentStock(bItem.productId, Number(bItem.quantity) * qty);
+      const p = await Product.findByPk(bItem.productId, { attributes: ['id', 'name', 'sku'] });
+      if (p) componentDetails.push({ name: p.name, sku: p.sku, quantity: Number(bItem.quantity) * qty });
     }
 
     return InventoryAdjustment.findByPk(adjustment.id, {
@@ -831,6 +941,7 @@ async function createAdjustment(data, reqUser) {
     }).then(a => {
       const j = a.toJSON();
       j.items = [{ product: j.Product, quantity: j.quantity }];
+      j.components = componentDetails;
       j.createdBy = j.createdByUser;
       delete j.createdByUser;
       delete j.Product;
