@@ -857,13 +857,18 @@ async function createAdjustment(data, reqUser) {
     }
 
     if (type === 'DECREASE') {
-      // Validation: Check if all components have enough stock
+      // Validation: Check if all components have enough stock in the SELECTED warehouse
       for (const bItem of bundle.BundleItems) {
-        const pStock = await ProductStock.findOne({ where: { productId: bItem.productId } });
+        const pStock = await ProductStock.findOne({ 
+          where: { 
+            productId: bItem.productId, 
+            warehouseId: warehouseId || null 
+          } 
+        });
         const needed = Number(bItem.quantity) * qty;
         if (!pStock || (Number(pStock.quantity) - Number(pStock.reserved)) < needed) {
            const part = await Product.findByPk(bItem.productId);
-           throw new Error(`Insufficient stock for component: ${part?.name || bItem.productId}`);
+           throw new Error(`Insufficient stock for component: ${part?.name || bItem.productId} in the selected warehouse`);
         }
       }
     }
@@ -898,7 +903,7 @@ async function createAdjustment(data, reqUser) {
         }
       } else {
         // Standard Part
-        let pStock = await ProductStock.findOne({ where: { productId: pid } });
+        let pStock = await ProductStock.findOne({ where: { productId: pid, warehouseId: warehouseId || null } });
         if (pStock) {
           if (type === 'INCREASE') await pStock.increment('quantity', { by: targetQty });
           else await pStock.decrement('quantity', { by: targetQty });
@@ -930,6 +935,13 @@ async function createAdjustment(data, reqUser) {
       await recursiveAdjustComponentStock(bItem.productId, Number(bItem.quantity) * qty);
       const p = await Product.findByPk(bItem.productId, { attributes: ['id', 'name', 'sku'] });
       if (p) componentDetails.push({ name: p.name, sku: p.sku, quantity: Number(bItem.quantity) * qty });
+    }
+
+    // [NEW] Also adjust static stock for the Bundle Product itself if it exists
+    const bStock = await ProductStock.findOne({ where: { productId: productId, warehouseId: warehouseId || null } });
+    if (bStock) {
+      if (type === 'INCREASE') await bStock.increment('quantity', { by: qty });
+      else await bStock.decrement('quantity', { by: qty });
     }
 
     return InventoryAdjustment.findByPk(adjustment.id, {
@@ -1043,7 +1055,7 @@ async function removeAdjustment(id, reqUser) {
       }
     } else {
       // Standard Part
-      const pStock = await ProductStock.findOne({ where: { productId: pid } });
+      const pStock = await ProductStock.findOne({ where: { productId: pid, warehouseId: adj.warehouseId || null } });
       if (pStock) {
         if (adj.type === 'INCREASE') await pStock.decrement('quantity', { by: targetQty });
         else await pStock.increment('quantity', { by: targetQty });
@@ -1061,6 +1073,13 @@ async function removeAdjustment(id, reqUser) {
       for (const bItem of bundle.BundleItems) {
         await recursiveRevertComponentStock(bItem.productId, Number(bItem.quantity) * Number(adj.quantity));
       }
+    }
+
+    // [NEW] Also revert static stock for the Parent Bundle Product itself
+    const bStock = await ProductStock.findOne({ where: { productId: adj.productId, warehouseId: adj.warehouseId || null } });
+    if (bStock) {
+      if (adj.type === 'INCREASE') await bStock.decrement('quantity', { by: Number(adj.quantity) });
+      else await bStock.increment('quantity', { by: Number(adj.quantity) });
     }
   } else {
     // Regular product revert
