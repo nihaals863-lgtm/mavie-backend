@@ -104,6 +104,38 @@ async function listProducts(reqUser, query = {}) {
      }
   }
 
+  // [NEW] Calculate and augment virtual quantities for Products views
+  products = products.map(normalizeProductJson);
+
+  const companyId = reqUser.companyId || (query.companyId && typeof query.companyId !== 'object' ? query.companyId : null);
+  if (companyId) {
+     try {
+       const { Bundle, BundleItem, ProductStock } = require('../models');
+       const { Op } = require('sequelize');
+       const bundleProducts = products.filter(p => p.productType === 'BUNDLE');
+       
+       for (const p of bundleProducts) {
+          const b = await Bundle.findOne({ where: { sku: p.sku, companyId }, include: [{ model: BundleItem }] });
+          if (!b || !b.BundleItems || b.BundleItems.length === 0) continue;
+
+          let minAssembly = Infinity;
+          for (const item of b.BundleItems) {
+             const pStocks = await ProductStock.findAll({ where: { productId: item.productId } });
+             const avail = pStocks.reduce((sum, s) => sum + (Number(s.quantity || 0) - Number(s.reserved || 0)), 0);
+             const possible = Math.floor(avail / Number(item.quantity || 1));
+             if (possible < minAssembly) minAssembly = possible;
+          }
+          if (minAssembly === Infinity) minAssembly = 0;
+
+          if (minAssembly > 0) {
+             const stocks = Array.isArray(p.ProductStocks) ? p.ProductStocks : [];
+             stocks.push({ quantity: minAssembly, warehouseId: null, isVirtual: true });
+             p.ProductStocks = stocks;
+          }
+       }
+     } catch (_) {}
+  }
+
   return products;
 }
 
@@ -141,7 +173,23 @@ async function getProductById(id, reqUser) {
   });
   if (!product) throw new Error('Product not found');
   if (reqUser.role !== 'super_admin' && product.companyId !== reqUser.companyId) throw new Error('Product not found');
-  return normalizeProductJson(product);
+  const plain = normalizeProductJson(product);
+
+  // [NEW] If product is a bundle, load bundle items from Bundle table for Edit views
+  if (plain.productType === 'BUNDLE') {
+    const { Bundle } = require('../models');
+    const b = await Bundle.findOne({
+      where: { companyId: plain.companyId, sku: plain.sku },
+      include: [{ association: 'BundleItems' }]
+    });
+    if (b) {
+      plain.bundleItems = (b.BundleItems || []).map(it => ({ productId: it.productId, quantity: it.quantity }));
+    } else {
+      plain.bundleItems = [];
+    }
+  }
+
+  return plain;
 }
 
 async function createProduct(data, reqUser) {
@@ -193,6 +241,25 @@ async function createProduct(data, reqUser) {
   console.log('[DEBUG_SERVICE] Creating Product Payload:', JSON.stringify(payload, null, 2));
   const created = await Product.create(payload);
 
+  // [NEW] Automatically create Bundle / BundleItems if provided in form
+  if (payload.productType === 'BUNDLE' && Array.isArray(data.bundleItems)) {
+    const { Bundle, BundleItem } = require('../models');
+    const b = await Bundle.create({
+      companyId: payload.companyId,
+      sku: payload.sku,
+      barcode: payload.barcode || null,
+      name: payload.name,
+      description: payload.description || null,
+      costPrice: payload.costPrice ?? 0,
+      sellingPrice: payload.price ?? 0, // Using product price
+      status: payload.status || 'ACTIVE',
+    });
+    const items = data.bundleItems.filter(i => i.productId && i.quantity > 0);
+    for (const it of items) {
+      await BundleItem.create({ bundleId: b.id, productId: it.productId, quantity: it.quantity });
+    }
+  }
+
   // [NEW] Handle Initial Stock creation if openingStock is provided
   const openingStock = Number(data.openingStock) || 0;
   const { initialWarehouseId, initialLocationId } = data;
@@ -241,7 +308,7 @@ async function createProduct(data, reqUser) {
     });
   }
 
-  return normalizeProductJson(created);
+  return getProductById(created.id, reqUser);
 }
 
 async function bulkCreateProducts(productsArray, reqUser) {
@@ -362,6 +429,39 @@ async function updateProduct(id, data, reqUser) {
   if (Object.keys(upd).length === 0) return normalizeProductJson(product);
   console.log('[DEBUG_SERVICE] Final Update Object:', JSON.stringify(upd, null, 2));
   await product.update(upd);
+
+  // [NEW] Sync Bundle information on product update
+  if (data.bundleItems !== undefined && (data.productType === 'BUNDLE' || product.productType === 'BUNDLE')) {
+    const { Bundle, BundleItem } = require('../models');
+    let b = await Bundle.findOne({ where: { companyId: product.companyId, sku: product.sku } });
+    if (!b) {
+      b = await Bundle.create({
+        companyId: product.companyId,
+        sku: product.sku,
+        barcode: product.barcode || null,
+        name: product.name,
+        description: product.description || null,
+        costPrice: product.costPrice ?? 0,
+        sellingPrice: product.price ?? 0,
+        status: product.status || 'ACTIVE',
+      });
+    } else {
+      await b.update({
+        barcode: product.barcode || b.barcode,
+        name: product.name || b.name,
+        description: product.description !== undefined ? product.description : b.description,
+        costPrice: product.costPrice !== undefined ? product.costPrice : b.costPrice,
+        sellingPrice: product.price !== undefined ? product.price : b.sellingPrice,
+        status: product.status || b.status,
+      });
+    }
+    await BundleItem.destroy({ where: { bundleId: b.id } });
+    const items = Array.isArray(data.bundleItems) ? data.bundleItems.filter(i => i.productId && i.quantity > 0) : [];
+    for (const it of items) {
+      await BundleItem.create({ bundleId: b.id, productId: it.productId, quantity: it.quantity });
+    }
+  }
+
   const updated = await Product.findByPk(id, {
     include: [
       { association: 'Category' },
@@ -376,7 +476,7 @@ async function updateProduct(id, data, reqUser) {
       },
     ],
   });
-  return normalizeProductJson(updated || product);
+  return getProductById(id, reqUser);
 }
 
 async function addAlternativeSku(productId, payload, reqUser) {
@@ -419,6 +519,14 @@ async function removeProduct(id, reqUser) {
   const product = await Product.findByPk(id);
   if (!product) throw new Error('Product not found');
   if (reqUser.role !== 'super_admin' && product.companyId !== reqUser.companyId) throw new Error('Product not found');
+  if (product.productType === 'BUNDLE') {
+    const bundle = await Bundle.findOne({ where: { sku: product.sku, companyId: product.companyId } });
+    if (bundle) {
+      const { BundleItem } = require('../models');
+      await BundleItem.destroy({ where: { bundleId: bundle.id } });
+      await bundle.destroy();
+    }
+  }
   await ProductStock.destroy({ where: { productId: id } });
   await product.destroy();
   return { message: 'Product deleted' };
@@ -521,7 +629,16 @@ async function listStock(reqUser, query = {}) {
         Warehouse: query.warehouseId ? { name: 'Multiple/Virtual' } : null,
         updatedAt: new Date()
       };
-      stocks.push(virtualRecord);
+
+      // MERGE or SUPPRESS duplicates that have static rows
+      const existingIdx = stocks.findIndex(s => s.productId === bProd.id && !s.isVirtual);
+      if (existingIdx !== -1) {
+         // Augment with Virtual Quantity rather than pushing duplicate row
+         stocks[existingIdx] = stocks[existingIdx].toJSON ? stocks[existingIdx].toJSON() : stocks[existingIdx];
+         stocks[existingIdx].virtualQuantity = minAssembly;
+      } else {
+         stocks.push(virtualRecord);
+      }
     }
   }
 
