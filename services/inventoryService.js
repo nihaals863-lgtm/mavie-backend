@@ -430,6 +430,92 @@ async function updateProduct(id, data, reqUser) {
   console.log('[DEBUG_SERVICE] Final Update Object:', JSON.stringify(upd, null, 2));
   await product.update(upd);
 
+  // [NEW] Handle Stock Adjustments if openingStock is provided during edit
+  const openingStock = Number(data.openingStock);
+  const { initialWarehouseId, initialLocationId } = data;
+
+  if (!isNaN(openingStock) && initialWarehouseId) {
+    // Find absolute first matching record
+    let stock = await ProductStock.findOne({
+      where: { productId: product.id, warehouseId: initialWarehouseId, locationId: initialLocationId || null }
+    });
+
+    if (!stock) {
+      if (openingStock > 0) {
+        await ProductStock.create({
+          productId: product.id,
+          warehouseId: initialWarehouseId,
+          locationId: initialLocationId || null,
+          quantity: openingStock,
+          status: 'ACTIVE',
+        });
+
+        await Movement.create({
+          companyId: product.companyId,
+          productId: product.id,
+          warehouseId: initialWarehouseId,
+          toLocationId: initialLocationId || null,
+          type: 'INCREASE',
+          quantity: openingStock,
+          reason: 'Opening Stock',
+          createdBy: reqUser.id,
+        });
+
+        await InventoryAdjustment.create({
+          referenceNumber: generateAdjustmentReference(),
+          companyId: product.companyId,
+          productId: product.id,
+          warehouseId: initialWarehouseId,
+          type: 'INCREASE',
+          quantity: openingStock,
+          reason: 'Opening Stock',
+          notes: 'Initial stock added during product edit',
+          status: 'COMPLETED',
+          createdBy: reqUser.id,
+        });
+      }
+    } else {
+      // Record already exists. Calculate relative difference
+      const currentQty = Number(stock.quantity);
+      const diff = openingStock - currentQty;
+
+      if (diff !== 0) {
+        // Adjust the stock record directly
+        if (diff > 0) {
+          await stock.increment('quantity', { by: diff });
+        } else {
+          await stock.decrement('quantity', { by: Math.abs(diff) });
+        }
+
+        // Log movement with proper typings
+        await Movement.create({
+          companyId: product.companyId,
+          productId: product.id,
+          warehouseId: initialWarehouseId,
+          [diff > 0 ? 'toLocationId' : 'fromLocationId']: initialLocationId || null,
+          type: diff > 0 ? 'INCREASE' : 'DECREASE',
+          quantity: Math.abs(diff),
+          reason: 'Adjustment during Edit',
+          createdBy: reqUser.id,
+        });
+
+        // Add corresponding relative adjustment feed
+        await InventoryAdjustment.create({
+          referenceNumber: generateAdjustmentReference(),
+          companyId: product.companyId,
+          productId: product.id,
+          warehouseId: initialWarehouseId,
+          type: diff > 0 ? 'INCREASE' : 'DECREASE',
+          quantity: Math.abs(diff),
+          reason: 'Adjustment during Edit',
+          notes: `Stock updated from ${currentQty} to ${openingStock} inside product edit`,
+          status: 'COMPLETED',
+          createdBy: reqUser.id,
+        });
+      }
+    }
+  }
+
   // [NEW] Sync Bundle information on product update
   if (data.bundleItems !== undefined && (data.productType === 'BUNDLE' || product.productType === 'BUNDLE')) {
     const { Bundle, BundleItem } = require('../models');
