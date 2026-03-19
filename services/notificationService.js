@@ -48,6 +48,64 @@ async function markAllAsRead(user) {
 }
 
 /**
+ * Checks low stock for a single product and creates/updates/clears notifications.
+ */
+async function checkProductLowStock(companyId, p, whIds) {
+    const totalQty = await ProductStock.sum('quantity', {
+        where: { productId: p.id, warehouseId: { [Op.in]: whIds } }
+    }) || 0;
+
+    const reorderLevel = p.reorderLevel || 0;
+
+    if (totalQty < reorderLevel) {
+        // Check if an unread notification already exists for this product alert
+        const existing = await Notification.findOne({
+            where: {
+                companyId,
+                userId: null, // Company-wide alerts
+                type: 'warning',
+                isRead: false,
+                title: 'Low Stock Alert',
+                message: { [Op.like]: `%(${p.sku})%` }
+            }
+        });
+
+        const newMessage = `Product ${p.name} (${p.sku}) is below reorder level. Current: ${totalQty}, Min: ${reorderLevel}`;
+
+        if (!existing) {
+            await create({
+                companyId,
+                title: 'Low Stock Alert',
+                message: newMessage,
+                type: 'warning',
+                priority: 'high',
+                link: `/products?highlight=${p.id}`
+            });
+        } else {
+            // Update the message so it shows the CURRENT stock
+            if (existing.message !== newMessage) {
+                await existing.update({ message: newMessage });
+            }
+        }
+    } else {
+        // Stock is sufficient. Absolute guarantee to clear stale alerts for this SKU
+        await Notification.update(
+            { isRead: true },
+            {
+                where: {
+                    companyId,
+                    userId: null,
+                    type: 'warning',
+                    isRead: false,
+                    title: 'Low Stock Alert',
+                    message: { [Op.like]: `%(${p.sku})%` }
+                }
+            }
+        );
+    }
+}
+
+/**
  * Scans all products for a company and generates notifications if stock is below reorder level.
  */
 async function checkLowStockAndNotify(companyId) {
@@ -63,35 +121,22 @@ async function checkLowStockAndNotify(companyId) {
     if (whIds.length === 0) return;
 
     for (const p of products) {
-        const totalQty = await ProductStock.sum('quantity', {
-            where: { productId: p.id, warehouseId: { [Op.in]: whIds } }
-        }) || 0;
-
-        if (totalQty < (p.reorderLevel || 0)) {
-            // Check if a recent unread notification already exists to avoid spam
-            const existing = await Notification.findOne({
-                where: {
-                    companyId,
-                    userId: null, // Company-wide alerts
-                    type: 'warning',
-                    isRead: false,
-                    title: 'Low Stock Alert',
-                    message: { [Op.like]: `%(${p.sku})%` }
-                }
-            });
-
-            if (!existing) {
-                await create({
-                    companyId,
-                    title: 'Low Stock Alert',
-                    message: `Product ${p.name} (${p.sku}) is below reorder level. Current: ${totalQty}, Min: ${p.reorderLevel}`,
-                    type: 'warning',
-                    priority: 'high',
-                    link: `/products?highlight=${p.id}`
-                });
-            }
-        }
+        await checkProductLowStock(companyId, p, whIds);
     }
+}
+
+async function checkSingleProductLowStockAndNotify(companyId, productId) {
+    const p = await Product.findByPk(productId, {
+        attributes: ['id', 'name', 'sku', 'reorderLevel', 'companyId']
+    });
+    if (!p) return;
+
+    const warehouses = await Warehouse.findAll({ where: { companyId: p.companyId }, attributes: ['id'] });
+    const whIds = warehouses.map(w => w.id);
+
+    if (whIds.length === 0) return;
+
+    await checkProductLowStock(p.companyId, p, whIds);
 }
 
 module.exports = {
@@ -99,5 +144,6 @@ module.exports = {
     create,
     markAsRead,
     markAllAsRead,
-    checkLowStockAndNotify
+    checkLowStockAndNotify,
+    checkSingleProductLowStockAndNotify
 };

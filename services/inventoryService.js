@@ -62,46 +62,46 @@ async function listProducts(reqUser, query = {}) {
 
   // Fallback: If no products found or for autocomplete, search bundles too
   if (query.search) {
-     const cleanSearch = query.search.trim();
-     const { Bundle } = require('../models');
-     
-     // Search for bundles that match the search term
-     const bundles = await Bundle.findAll({
-       where: {
-         companyId: where.companyId || { [Op.ne]: null },
-         [Op.or]: [
-           { sku: { [Op.like]: `%${cleanSearch}%` } },
-           { barcode: { [Op.like]: `%${cleanSearch}%` } },
-           { name: { [Op.like]: `%${cleanSearch}%` } }
-         ]
-       },
-       limit: 10
-     });
+    const cleanSearch = query.search.trim();
+    const { Bundle } = require('../models');
 
-     if (bundles.length > 0) {
-        const bundleSkus = bundles.map(b => b.sku);
-        const bundleProducts = await Product.findAll({
-          where: { 
-            sku: { [Op.in]: bundleSkus }, 
-            companyId: where.companyId || { [Op.ne]: null },
-            productType: 'BUNDLE'
-          },
-          include: [
-            { association: 'Category', attributes: ['id', 'name', 'code'], required: false },
-            { association: 'Company', attributes: ['id', 'name', 'code'], required: false },
-            { association: 'ProductStocks', attributes: ['quantity', 'warehouseId'], required: false },
-          ]
-        });
+    // Search for bundles that match the search term
+    const bundles = await Bundle.findAll({
+      where: {
+        companyId: where.companyId || { [Op.ne]: null },
+        [Op.or]: [
+          { sku: { [Op.like]: `%${cleanSearch}%` } },
+          { barcode: { [Op.like]: `%${cleanSearch}%` } },
+          { name: { [Op.like]: `%${cleanSearch}%` } }
+        ]
+      },
+      limit: 10
+    });
 
-        // Add to products list, avoiding duplicates if already found
-        const existingIds = new Set(products.map(p => p.id));
-        bundleProducts.forEach(bp => {
-           if (!existingIds.has(bp.id)) {
-              products.push(bp);
-              existingIds.add(bp.id);
-           }
-        });
-     }
+    if (bundles.length > 0) {
+      const bundleSkus = bundles.map(b => b.sku);
+      const bundleProducts = await Product.findAll({
+        where: {
+          sku: { [Op.in]: bundleSkus },
+          companyId: where.companyId || { [Op.ne]: null },
+          productType: 'BUNDLE'
+        },
+        include: [
+          { association: 'Category', attributes: ['id', 'name', 'code'], required: false },
+          { association: 'Company', attributes: ['id', 'name', 'code'], required: false },
+          { association: 'ProductStocks', attributes: ['quantity', 'warehouseId'], required: false },
+        ]
+      });
+
+      // Add to products list, avoiding duplicates if already found
+      const existingIds = new Set(products.map(p => p.id));
+      bundleProducts.forEach(bp => {
+        if (!existingIds.has(bp.id)) {
+          products.push(bp);
+          existingIds.add(bp.id);
+        }
+      });
+    }
   }
 
   // [NEW] Calculate and augment virtual quantities for Products views
@@ -109,31 +109,31 @@ async function listProducts(reqUser, query = {}) {
 
   const companyId = reqUser.companyId || (query.companyId && typeof query.companyId !== 'object' ? query.companyId : null);
   if (companyId) {
-     try {
-       const { Bundle, BundleItem, ProductStock } = require('../models');
-       const { Op } = require('sequelize');
-       const bundleProducts = products.filter(p => p.productType === 'BUNDLE');
-       
-       for (const p of bundleProducts) {
-          const b = await Bundle.findOne({ where: { sku: p.sku, companyId }, include: [{ model: BundleItem }] });
-          if (!b || !b.BundleItems || b.BundleItems.length === 0) continue;
+    try {
+      const { Bundle, BundleItem, ProductStock } = require('../models');
+      const { Op } = require('sequelize');
+      const bundleProducts = products.filter(p => p.productType === 'BUNDLE');
 
-          let minAssembly = Infinity;
-          for (const item of b.BundleItems) {
-             const pStocks = await ProductStock.findAll({ where: { productId: item.productId } });
-             const avail = pStocks.reduce((sum, s) => sum + (Number(s.quantity || 0) - Number(s.reserved || 0)), 0);
-             const possible = Math.floor(avail / Number(item.quantity || 1));
-             if (possible < minAssembly) minAssembly = possible;
-          }
-          if (minAssembly === Infinity) minAssembly = 0;
+      for (const p of bundleProducts) {
+        const b = await Bundle.findOne({ where: { sku: p.sku, companyId }, include: [{ model: BundleItem }] });
+        if (!b || !b.BundleItems || b.BundleItems.length === 0) continue;
 
-          if (minAssembly > 0) {
-             const stocks = Array.isArray(p.ProductStocks) ? p.ProductStocks : [];
-             stocks.push({ quantity: minAssembly, warehouseId: null, isVirtual: true });
-             p.ProductStocks = stocks;
-          }
-       }
-     } catch (_) {}
+        let minAssembly = Infinity;
+        for (const item of b.BundleItems) {
+          const pStocks = await ProductStock.findAll({ where: { productId: item.productId } });
+          const avail = pStocks.reduce((sum, s) => sum + (Number(s.quantity || 0) - Number(s.reserved || 0)), 0);
+          const possible = Math.floor(avail / Number(item.quantity || 1));
+          if (possible < minAssembly) minAssembly = possible;
+        }
+        if (minAssembly === Infinity) minAssembly = 0;
+
+        if (minAssembly > 0) {
+          const stocks = Array.isArray(p.ProductStocks) ? p.ProductStocks : [];
+          stocks.push({ quantity: minAssembly, warehouseId: null, isVirtual: true });
+          p.ProductStocks = stocks;
+        }
+      }
+    } catch (_) { }
   }
 
   return products;
@@ -673,14 +673,14 @@ async function listStock(reqUser, query = {}) {
   if (companyId) {
     const bundleWhere = { companyId, status: 'ACTIVE' };
     if (query.sku) bundleWhere.sku = query.sku;
-    
+
     const bundles = await Bundle.findAll({
       where: bundleWhere,
       include: [{ model: BundleItem }]
     });
 
     for (const b of bundles) {
-      const bProd = await Product.findOne({ 
+      const bProd = await Product.findOne({
         where: { sku: b.sku, companyId, productType: 'BUNDLE' },
         include: [{ association: 'Category', attributes: ['id', 'name'] }]
       });
@@ -719,11 +719,11 @@ async function listStock(reqUser, query = {}) {
       // MERGE or SUPPRESS duplicates that have static rows
       const existingIdx = stocks.findIndex(s => s.productId === bProd.id && !s.isVirtual);
       if (existingIdx !== -1) {
-         // Augment with Virtual Quantity rather than pushing duplicate row
-         stocks[existingIdx] = stocks[existingIdx].toJSON ? stocks[existingIdx].toJSON() : stocks[existingIdx];
-         stocks[existingIdx].virtualQuantity = minAssembly;
+        // Augment with Virtual Quantity rather than pushing duplicate row
+        stocks[existingIdx] = stocks[existingIdx].toJSON ? stocks[existingIdx].toJSON() : stocks[existingIdx];
+        stocks[existingIdx].virtualQuantity = minAssembly;
       } else {
-         stocks.push(virtualRecord);
+        stocks.push(virtualRecord);
       }
     }
   }
@@ -1062,16 +1062,16 @@ async function createAdjustment(data, reqUser) {
     if (type === 'DECREASE') {
       // Validation: Check if all components have enough stock in the SELECTED warehouse
       for (const bItem of bundle.BundleItems) {
-        const pStock = await ProductStock.findOne({ 
-          where: { 
-            productId: bItem.productId, 
-            warehouseId: warehouseId || null 
-          } 
+        const pStock = await ProductStock.findOne({
+          where: {
+            productId: bItem.productId,
+            warehouseId: warehouseId || null
+          }
         });
         const needed = Number(bItem.quantity) * qty;
         if (!pStock || (Number(pStock.quantity) - Number(pStock.reserved)) < needed) {
-           const part = await Product.findByPk(bItem.productId);
-           throw new Error(`Insufficient stock for component: ${part?.name || bItem.productId} in the selected warehouse`);
+          const part = await Product.findByPk(bItem.productId);
+          throw new Error(`Insufficient stock for component: ${part?.name || bItem.productId} in the selected warehouse`);
         }
       }
     }
@@ -1101,7 +1101,7 @@ async function createAdjustment(data, reqUser) {
         });
         if (subBundle && subBundle.BundleItems?.length) {
           for (const sItem of subBundle.BundleItems) {
-             await recursiveAdjustComponentStock(sItem.productId, Number(sItem.quantity) * targetQty);
+            await recursiveAdjustComponentStock(sItem.productId, Number(sItem.quantity) * targetQty);
           }
         }
       } else {
@@ -1253,7 +1253,7 @@ async function removeAdjustment(id, reqUser) {
       });
       if (subBundle && subBundle.BundleItems?.length) {
         for (const sItem of subBundle.BundleItems) {
-           await recursiveRevertComponentStock(sItem.productId, Number(sItem.quantity) * targetQty);
+          await recursiveRevertComponentStock(sItem.productId, Number(sItem.quantity) * targetQty);
         }
       }
     } else {
@@ -1265,7 +1265,7 @@ async function removeAdjustment(id, reqUser) {
       }
     }
   };
-  
+
   if (product && product.productType === 'BUNDLE') {
     const bundle = await Bundle.findOne({
       where: { sku: product.sku, companyId: product.companyId },
@@ -1809,6 +1809,15 @@ async function createMovement(data, reqUser) {
     }
 
     await transaction.commit();
+
+    // Trigger notification update (Since increment/decrement bypasses hooks)
+    try {
+      const { checkSingleProductLowStockAndNotify } = require('./notificationService');
+      await checkSingleProductLowStockAndNotify(companyId, productId);
+    } catch (err) {
+       console.error('[Movement Alert] Error:', err.message);
+    }
+
     return getMovementById(movement.id, reqUser);
 
   } catch (err) {
