@@ -21,8 +21,8 @@ async function list(user, query = {}) {
     });
 }
 
-async function create(data) {
-    return await Notification.create(data);
+async function create(data, transaction = null) {
+    return await Notification.create(data, { transaction });
 }
 
 async function markAsRead(id, user) {
@@ -50,9 +50,10 @@ async function markAllAsRead(user) {
 /**
  * Checks low stock for a single product and creates/updates/clears notifications.
  */
-async function checkProductLowStock(companyId, p, whIds) {
+async function checkProductLowStock(companyId, p, whIds, transaction = null) {
     const totalQty = await ProductStock.sum('quantity', {
-        where: { productId: p.id, warehouseId: { [Op.in]: whIds } }
+        where: { productId: p.id, warehouseId: { [Op.in]: whIds } },
+        transaction
     }) || 0;
 
     const reorderLevel = p.reorderLevel || 0;
@@ -67,7 +68,8 @@ async function checkProductLowStock(companyId, p, whIds) {
                 isRead: false,
                 title: 'Low Stock Alert',
                 message: { [Op.like]: `%(${p.sku})%` }
-            }
+            },
+            transaction
         });
 
         const newMessage = `Product ${p.name} (${p.sku}) is below reorder level. Current: ${totalQty}, Min: ${reorderLevel}`;
@@ -80,11 +82,11 @@ async function checkProductLowStock(companyId, p, whIds) {
                 type: 'warning',
                 priority: 'high',
                 link: `/products?highlight=${p.id}`
-            });
+            }, transaction);
         } else {
             // Update the message so it shows the CURRENT stock
             if (existing.message !== newMessage) {
-                await existing.update({ message: newMessage });
+                await existing.update({ message: newMessage }, { transaction });
             }
         }
     } else {
@@ -99,7 +101,8 @@ async function checkProductLowStock(companyId, p, whIds) {
                     isRead: false,
                     title: 'Low Stock Alert',
                     message: { [Op.like]: `%(${p.sku})%` }
-                }
+                },
+                transaction
             }
         );
     }
@@ -125,18 +128,23 @@ async function checkLowStockAndNotify(companyId) {
     }
 }
 
-async function checkSingleProductLowStockAndNotify(companyId, productId) {
+async function checkSingleProductLowStockAndNotify(companyId, productId, transaction = null) {
     const p = await Product.findByPk(productId, {
-        attributes: ['id', 'name', 'sku', 'reorderLevel', 'companyId']
+        attributes: ['id', 'name', 'sku', 'reorderLevel', 'companyId'],
+        transaction
     });
     if (!p) return;
 
-    const warehouses = await Warehouse.findAll({ where: { companyId: p.companyId }, attributes: ['id'] });
+    const warehouses = await Warehouse.findAll({ 
+        where: { companyId: p.companyId }, 
+        attributes: ['id'],
+        transaction 
+    });
     const whIds = warehouses.map(w => w.id);
 
     if (whIds.length === 0) return;
 
-    await checkProductLowStock(p.companyId, p, whIds);
+    await checkProductLowStock(p.companyId, p, whIds, transaction);
 }
 
 module.exports = {

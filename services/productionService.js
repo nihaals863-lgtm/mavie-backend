@@ -11,6 +11,7 @@ const {
 } = require('../models');
 const { Op } = require('sequelize');
 const { convert } = require('../utils/unitConverter');
+const notificationService = require('./notificationService');
 
 async function list(user, query = {}) {
     const { status, productionAreaId } = query;
@@ -205,29 +206,44 @@ async function adjustStock(companyId, userId, productId, warehouseId, qty, unit,
     }, { transaction });
 
     // 2. Update ProductStock
-    let stock = await ProductStock.findOne({
-        where: { productId, warehouseId },
-        transaction
-    });
-
-    if (stock) {
-        if (isIncrease) {
+    if (isIncrease) {
+        let stock = await ProductStock.findOne({ where: { productId, warehouseId }, transaction });
+        if (stock) {
             await stock.increment('quantity', { by: absQty, transaction });
         } else {
-            if (parseFloat(stock.quantity) < absQty) {
-                throw new Error(`Insufficient stock for ${product.name} in warehouse ${warehouseId}. Required: ${absQty} ${productUnit}, Available: ${stock.quantity} ${productUnit}`);
-            }
-            await stock.decrement('quantity', { by: absQty, transaction });
+            await ProductStock.create({
+                productId,
+                warehouseId,
+                quantity: absQty,
+                status: 'ACTIVE'
+            }, { transaction });
         }
-    } else if (isIncrease) {
-        await ProductStock.create({
-            productId,
-            warehouseId,
-            quantity: absQty,
-            status: 'ACTIVE'
-        }, { transaction });
     } else {
-        throw new Error(`No stock record found for product ID ${productId}`);
+        const stocks = await ProductStock.findAll({
+            where: { productId, warehouseId, status: 'ACTIVE' },
+            order: [['quantity', 'DESC']], // Consume from larger batches to avoid fragments
+            transaction
+        });
+
+        const totalAvailable = stocks.reduce((sum, s) => sum + parseFloat(s.quantity || 0), 0);
+        if (totalAvailable < absQty) {
+            throw new Error(`Insufficient stock for ${product.name} in warehouse ${warehouseId}. Required: ${absQty} ${productUnit}, Available: ${totalAvailable} ${productUnit}`);
+        }
+
+        let remainingToDeduct = absQty;
+        for (const s of stocks) {
+            if (remainingToDeduct <= 0) break;
+            const currentQty = parseFloat(s.quantity || 0);
+            if (currentQty <= 0) continue;
+
+            const deductFromThis = Math.min(currentQty, remainingToDeduct);
+            await s.decrement('quantity', { by: deductFromThis, transaction });
+            remainingToDeduct -= deductFromThis;
+        }
+
+        if (remainingToDeduct > 0) {
+            throw new Error(`Deduction failed for ${product.name}: Could not exhaust required quantity from layout rows.`);
+        }
     }
 
     // 3. Movement Record
@@ -238,8 +254,10 @@ async function adjustStock(companyId, userId, productId, warehouseId, qty, unit,
         warehouseId,
         quantity: absQty,
         reason: adjustmentReason,
-        createdBy: userId
     }, { transaction });
+
+    // 4. Update Low Stock Notification (Real-time)
+    await notificationService.checkSingleProductLowStockAndNotify(companyId, productId, transaction);
 }
 
 async function startProduction(orderId, user) {
