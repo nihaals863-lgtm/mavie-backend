@@ -112,7 +112,7 @@ async function listProducts(reqUser, query = {}) {
     try {
       const { Bundle, BundleItem, ProductStock } = require('../models');
       const { Op } = require('sequelize');
-      const bundleProducts = products.filter(p => p.productType === 'BUNDLE');
+      const bundleProducts = products.filter(p => p.productType === 'BUNDLE' || p.productType === 'MULTICOMBO');
 
       for (const p of bundleProducts) {
         const b = await Bundle.findOne({ where: { sku: p.sku, companyId }, include: [{ model: BundleItem }] });
@@ -176,7 +176,7 @@ async function getProductById(id, reqUser) {
   const plain = normalizeProductJson(product);
 
   // [NEW] If product is a bundle, load bundle items from Bundle table for Edit views
-  if (plain.productType === 'BUNDLE') {
+  if (plain.productType === 'BUNDLE' || plain.productType === 'MULTICOMBO') {
     const { Bundle } = require('../models');
     const b = await Bundle.findOne({
       where: { companyId: plain.companyId, sku: plain.sku },
@@ -242,7 +242,7 @@ async function createProduct(data, reqUser) {
   const created = await Product.create(payload);
 
   // [NEW] Automatically create Bundle / BundleItems if provided in form
-  if (payload.productType === 'BUNDLE' && Array.isArray(data.bundleItems)) {
+  if ((payload.productType === 'BUNDLE' || payload.productType === 'MULTICOMBO') && Array.isArray(data.bundleItems)) {
     const { Bundle, BundleItem } = require('../models');
     const b = await Bundle.create({
       companyId: payload.companyId,
@@ -517,7 +517,7 @@ async function updateProduct(id, data, reqUser) {
   }
 
   // [NEW] Sync Bundle information on product update
-  if (data.bundleItems !== undefined && (data.productType === 'BUNDLE' || product.productType === 'BUNDLE')) {
+  if (data.bundleItems !== undefined && (data.productType === 'BUNDLE' || data.productType === 'MULTICOMBO' || product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO')) {
     const { Bundle, BundleItem } = require('../models');
     let b = await Bundle.findOne({ where: { companyId: product.companyId, sku: product.sku } });
     if (!b) {
@@ -605,7 +605,7 @@ async function removeProduct(id, reqUser) {
   const product = await Product.findByPk(id);
   if (!product) throw new Error('Product not found');
   if (reqUser.role !== 'super_admin' && product.companyId !== reqUser.companyId) throw new Error('Product not found');
-  if (product.productType === 'BUNDLE') {
+  if (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO') {
     const bundle = await Bundle.findOne({ where: { sku: product.sku, companyId: product.companyId } });
     if (bundle) {
       const { BundleItem } = require('../models');
@@ -681,7 +681,7 @@ async function listStock(reqUser, query = {}) {
 
     for (const b of bundles) {
       const bProd = await Product.findOne({
-        where: { sku: b.sku, companyId, productType: 'BUNDLE' },
+        where: { sku: b.sku, companyId, productType: { [Op.in]: ['BUNDLE', 'MULTICOMBO'] } },
         include: [{ association: 'Category', attributes: ['id', 'name'] }]
       });
       if (!bProd) continue;
@@ -1049,7 +1049,7 @@ async function createAdjustment(data, reqUser) {
   }
 
   // [BUNDLE LOGIC] If product is a bundle, we check and adjust components instead
-  if (product.productType === 'BUNDLE') {
+  if (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO') {
     const bundle = await Bundle.findOne({
       where: { sku: product.sku, companyId: product.companyId },
       include: [{ model: BundleItem }]
@@ -1094,7 +1094,7 @@ async function createAdjustment(data, reqUser) {
       const part = await Product.findByPk(pid);
       if (!part) return;
 
-      if (part.productType === 'BUNDLE') {
+      if (part.productType === 'BUNDLE' || part.productType === 'MULTICOMBO') {
         const subBundle = await Bundle.findOne({
           where: { sku: part.sku, companyId: part.companyId },
           include: [{ model: BundleItem }]
@@ -1246,7 +1246,7 @@ async function removeAdjustment(id, reqUser) {
     const part = await Product.findByPk(pid);
     if (!part) return;
 
-    if (part.productType === 'BUNDLE') {
+    if (part.productType === 'BUNDLE' || part.productType === 'MULTICOMBO') {
       const subBundle = await Bundle.findOne({
         where: { sku: part.sku, companyId: part.companyId },
         include: [{ model: BundleItem }]
@@ -1266,7 +1266,7 @@ async function removeAdjustment(id, reqUser) {
     }
   };
 
-  if (product && product.productType === 'BUNDLE') {
+  if (product && (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO')) {
     const bundle = await Bundle.findOne({
       where: { sku: product.sku, companyId: product.companyId },
       include: [{ model: BundleItem }]
