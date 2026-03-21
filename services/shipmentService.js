@@ -100,7 +100,7 @@ async function update(id, data, reqUser) {
         if (!product) continue;
 
         // Bundle logic: if product is a bundle, deduct parts
-        if (product.productType === 'BUNDLE') {
+        if (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO') {
           const bundle = await Bundle.findOne({
             where: { sku: product.sku, companyId: product.companyId },
             include: [{ model: BundleItem }]
@@ -160,7 +160,7 @@ async function deductStockForShipment(shipmentId, reqUser) {
       const product = await Product.findByPk(pid);
       if (!product) continue;
 
-      if (product.productType === 'BUNDLE') {
+      if (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO') {
         const bundle = await Bundle.findOne({
           where: { sku: product.sku, companyId: product.companyId },
           include: [{ model: BundleItem }]
@@ -233,7 +233,7 @@ async function remove(id, reqUser) {
       const part = await Product.findByPk(pid);
       if (!part) return;
 
-      if (part.productType === 'BUNDLE') {
+      if (part.productType === 'BUNDLE' || part.productType === 'MULTICOMBO') {
         const subBundle = await Bundle.findOne({
           where: { sku: part.sku, companyId: part.companyId },
           include: [{ model: BundleItem }]
@@ -270,7 +270,7 @@ async function deductProductStock(pid, qty, companyId, salesOrderId) {
   if (!product) return false;
 
   // RECURSIVE BUNDLE LOGIC
-  if (product.productType === 'BUNDLE') {
+  if (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO') {
     const bundle = await Bundle.findOne({
       where: { sku: product.sku, companyId: product.companyId },
       include: [{ model: BundleItem }]
