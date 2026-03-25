@@ -7,14 +7,12 @@ const {
   PickList,
   PackingTask,
   Customer,
+  ProductionOrder,
 } = require('../models');
 const { Op } = require('sequelize');
 
 /**
  * GET /api/dashboard/stats
- * Role-aware: company_admin/warehouse_manager/inventory_manager/viewer see company scope;
- * super_admin can pass ?companyId= for a company or get first-company stats;
- * picker/packer see their company scope.
  */
 async function stats(req, res, next) {
   try {
@@ -50,35 +48,49 @@ async function stats(req, res, next) {
           include: [{ association: 'SalesOrder', where: { companyId }, required: true, attributes: [] }],
         })
         : PackingTask.count({ where: { status: { [Op.in]: ['pending', 'packing'] } } }),
+      // Production Order Counts
+      ProductionOrder.count({ where: { ...baseWhere, status: 'DRAFT' } }),
+      ProductionOrder.count({ where: { ...baseWhere, status: { [Op.in]: ['VALIDATED', 'IN_PRODUCTION'] } } }),
     ]);
 
-    // Total stock: sum of ProductStock.quantity (optionally scoped by company via Warehouse)
+    // Total stock
     let totalStock = 0;
     if (companyId) {
       const warehouses = await Warehouse.findAll({ where: { companyId }, attributes: ['id'] });
       const whIds = warehouses.map((w) => w.id);
-      const result = await ProductStock.sum('quantity', {
-        where: { warehouseId: { [Op.in]: whIds } },
-      });
-      totalStock = result || 0;
+      totalStock = await ProductStock.sum('quantity', { where: { warehouseId: { [Op.in]: whIds } } }) || 0;
     } else {
-      const result = await ProductStock.sum('quantity');
-      totalStock = result || 0;
+      totalStock = await ProductStock.sum('quantity') || 0;
     }
 
-    // Low stock: products where sum(stock) < reorderLevel (company-scoped)
+    // Critical products (Low Stock)
+    const criticalProducts = [];
     let lowStockCount = 0;
     if (companyId) {
       const products = await Product.findAll({
         where: { ...baseWhere, status: 'ACTIVE' },
-        attributes: ['id', 'reorderLevel'],
+        attributes: ['id', 'name', 'sku', 'reorderLevel', 'unitOfMeasure'],
       });
       const whIds = (await Warehouse.findAll({ where: { companyId }, attributes: ['id'] })).map((w) => w.id);
+      
       for (const p of products) {
         const sum = await ProductStock.sum('quantity', {
           where: { productId: p.id, warehouseId: { [Op.in]: whIds } },
-        });
-        if ((sum || 0) < (p.reorderLevel || 0)) lowStockCount += 1;
+        }) || 0;
+        
+        if (sum < (p.reorderLevel || 0)) {
+          lowStockCount += 1;
+          if (criticalProducts.length < 10) {
+              criticalProducts.push({
+                  id: p.id,
+                  name: p.name,
+                  sku: p.sku,
+                  stock: sum,
+                  reorderLevel: p.reorderLevel,
+                  unit: p.unitOfMeasure
+              });
+          }
+        }
       }
     }
 
@@ -95,6 +107,9 @@ async function stats(req, res, next) {
         lowStockCount,
         pickingPendingCount: counts[6],
         packingPendingCount: counts[7],
+        draftProductionCount: counts[8],
+        activeProductionCount: counts[9],
+        criticalProducts: criticalProducts.sort((a, b) => (a.stock / a.reorderLevel) - (b.stock / b.reorderLevel)),
       },
     });
   } catch (err) {

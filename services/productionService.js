@@ -7,6 +7,7 @@ const {
     ProductionFormulaItem,
     InventoryAdjustment,
     Movement,
+    ProductionArea,
     sequelize
 } = require('../models');
 const { Op } = require('sequelize');
@@ -14,16 +15,27 @@ const { convert } = require('../utils/unitConverter');
 const notificationService = require('./notificationService');
 
 async function list(user, query = {}) {
-    const { status, productionAreaId } = query;
+    const { status, productionAreaId, productId, search } = query;
+    const { Op } = require('sequelize');
+
     const where = { companyId: user.companyId };
     if (status) where.status = status;
     if (productionAreaId) where.productionAreaId = productionAreaId;
+    if (productId) where.productId = productId;
+    
+    if (search) {
+        where[Op.or] = [
+            { orderNumber: { [Op.like]: `%${search}%` } },
+            { '$Product.name$': { [Op.like]: `%${search}%` } },
+            { '$Product.sku$': { [Op.like]: `%${search}%` } }
+        ];
+    }
 
     return await ProductionOrder.findAll({
         where,
         include: [
             { model: Product },
-            { model: ProductionFormula },
+            { model: ProductionArea },
             {
                 model: ProductionOrderItem,
                 include: [{ model: Product }]
@@ -31,6 +43,37 @@ async function list(user, query = {}) {
         ],
         order: [['createdAt', 'DESC']]
     });
+}
+
+async function listAreas(user) {
+    return await ProductionArea.findAll({
+        where: { companyId: user.companyId },
+        order: [['name', 'ASC']]
+    });
+}
+
+async function createArea(data, user) {
+    return await ProductionArea.create({
+        ...data,
+        companyId: user.companyId
+    });
+}
+
+async function updateArea(id, data, user) {
+    const area = await ProductionArea.findOne({ where: { id, companyId: user.companyId } });
+    if (!area) throw new Error('Production Area not found');
+    return await area.update(data);
+}
+
+async function removeArea(id, user) {
+    const area = await ProductionArea.findOne({ where: { id, companyId: user.companyId } });
+    if (!area) throw new Error('Production Area not found');
+    
+    // Check if used in any orders
+    const count = await ProductionOrder.count({ where: { productionAreaId: id } });
+    if (count > 0) throw new Error('Cannot delete area while it has production orders linked to it.');
+    
+    return await area.destroy();
 }
 
 /**
@@ -77,8 +120,16 @@ async function create(data, user) {
             `Please go to Manufacturing → Formulas and create a formula for this product first.`
         );
 
+        const area = productionAreaId ? await ProductionArea.findByPk(productionAreaId) : null;
+        const prefix = area?.prefix || 'P';
+        
+        // Count existing orders for this company to generate a number (simple approach)
+        const orderCount = await ProductionOrder.count({ where: { companyId: user.companyId } });
+        const orderNumber = `${prefix}-${(orderCount + 1).toString().padStart(6, '0')}`;
+
         const order = await ProductionOrder.create({
             companyId: user.companyId,
+            orderNumber,
             productId,
             formulaId: formula.id,
             warehouseId, // Target Warehouse for finished goods
@@ -397,5 +448,9 @@ module.exports = {
     validateStock,
     startProduction,
     complete,
-    remove
+    remove,
+    listAreas,
+    createArea,
+    updateArea,
+    removeArea
 };

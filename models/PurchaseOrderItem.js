@@ -10,6 +10,7 @@ const PurchaseOrderItem = sequelize.define('PurchaseOrderItem', {
   quantity: { type: DataTypes.DECIMAL(12, 3), allowNull: false },
   unitPrice: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },
   totalPrice: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },
+  productionOrderId: { type: DataTypes.INTEGER, allowNull: true, field: 'production_order_id' },
 }, {
   tableName: 'purchase_order_items',
   timestamps: true,

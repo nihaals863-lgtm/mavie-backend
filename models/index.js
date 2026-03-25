@@ -35,6 +35,7 @@ const ProductionOrderItem = require('./ProductionOrderItem');
 const ProductionFormula = require('./ProductionFormula');
 const ProductionFormulaItem = require('./ProductionFormulaItem');
 const Notification = require('./Notification');
+const ProductionArea = require('./ProductionArea');
 
 // Company
 Company.hasMany(User, { foreignKey: 'companyId' });
@@ -202,6 +203,12 @@ Return.belongsTo(Customer, { foreignKey: 'customerId' });
 Company.hasMany(ProductionOrder, { foreignKey: 'companyId' });
 ProductionOrder.belongsTo(Company, { foreignKey: 'companyId' });
 
+Company.hasMany(ProductionArea, { foreignKey: 'companyId' });
+ProductionArea.belongsTo(Company, { foreignKey: 'companyId' });
+
+ProductionArea.hasMany(ProductionOrder, { foreignKey: 'productionAreaId' });
+ProductionOrder.belongsTo(ProductionArea, { foreignKey: 'productionAreaId' });
+
 Warehouse.hasMany(ProductionOrder, { foreignKey: 'warehouseId' });
 ProductionOrder.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
 
@@ -213,6 +220,12 @@ ProductionOrderItem.belongsTo(ProductionOrder, { foreignKey: 'productionOrderId'
 
 Product.hasMany(ProductionOrderItem, { foreignKey: 'productId' });
 ProductionOrderItem.belongsTo(Product, { foreignKey: 'productId' });
+
+ProductionOrderItem.belongsTo(ProductionOrder, { foreignKey: 'productionOrderId' });
+ProductionOrder.hasMany(ProductionOrderItem, { foreignKey: 'productionOrderId' });
+
+PurchaseOrderItem.belongsTo(ProductionOrder, { foreignKey: 'productionOrderId' });
+ProductionOrder.hasMany(PurchaseOrderItem, { foreignKey: 'productionOrderId' });
 
 // Formula Relationships
 Product.hasMany(ProductionFormula, { foreignKey: 'productId' });
@@ -271,4 +284,5 @@ module.exports = {
   ProductionFormula,
   ProductionFormulaItem,
   Notification,
+  ProductionArea,
 };

@@ -40,17 +40,27 @@ async function create(body, reqUser) {
   const companyId = reqUser.role === 'super_admin' ? (body.companyId || reqUser.companyId) : reqUser.companyId;
   if (!companyId) throw new Error('Company context required');
 
+  let supplierId = body.supplierId;
+  if (!supplierId && body.items && body.items.length > 0) {
+    // Auto-select: find primary supplier of the first product
+    const firstProd = await Product.findByPk(body.items[0].productId);
+    if (firstProd && firstProd.supplierId) {
+      supplierId = firstProd.supplierId;
+    }
+  }
+  if (!supplierId) throw new Error('Supplier required (Select one or ensure products have a primary supplier)');
+
+  const supplier = await Supplier.findByPk(supplierId);
+  if (!supplier || supplier.companyId !== companyId) throw new Error('Invalid supplier');
+
   const count = await PurchaseOrder.count({ where: { companyId } });
   const poNumber = `PO${String(count + 1).padStart(3, '0')}`;
-
-  const supplier = await Supplier.findByPk(body.supplierId);
-  if (!supplier || supplier.companyId !== companyId) throw new Error('Invalid supplier');
 
   const totalAmount = (body.items || []).reduce((sum, i) => sum + (Number(i.unitPrice) || 0) * (Number(i.quantity) || 0), 0);
 
   const po = await PurchaseOrder.create({
     companyId,
-    supplierId: body.supplierId,
+    supplierId,
     poNumber,
     status: body.status || 'pending',
     totalAmount,
@@ -66,6 +76,7 @@ async function create(body, reqUser) {
     quantity: Number(i.quantity) || 0,
     unitPrice: Number(i.unitPrice) || 0,
     totalPrice: (Number(i.quantity) || 0) * (Number(i.unitPrice) || 0),
+    productionOrderId: i.productionOrderId || null,
   }));
   if (items.length) await PurchaseOrderItem.bulkCreate(items);
 
@@ -96,6 +107,7 @@ async function update(id, body, reqUser) {
       quantity: Number(i.quantity) || 0,
       unitPrice: Number(i.unitPrice) || 0,
       totalPrice: (Number(i.quantity) || 0) * (Number(i.unitPrice) || 0),
+      productionOrderId: i.productionOrderId || null,
     })));
   } else {
     await po.save();

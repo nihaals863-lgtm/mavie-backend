@@ -168,6 +168,16 @@ async function createProduct(req, res, next) {
   }
 }
 
+async function duplicateProduct(req, res, next) {
+  try {
+    const data = await inventoryService.duplicateProduct(req.params.id, req.user);
+    res.status(201).json({ success: true, data });
+  } catch (err) {
+    if (err.message === 'Product not found') return res.status(404).json({ success: false, message: err.message });
+    next(err);
+  }
+}
+
 async function bulkCreateProducts(req, res, next) {
   try {
     const products = Array.isArray(req.body.products) ? req.body.products : req.body;
@@ -488,6 +498,7 @@ module.exports = {
   listProducts,
   getProduct,
   createProduct,
+  duplicateProduct,
   bulkCreateProducts,
   updateProduct,
   addAlternativeSku,

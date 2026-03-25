@@ -11,6 +11,7 @@ const Product = sequelize.define('Product', {
   description: { type: DataTypes.TEXT, allowNull: true },
   color: { type: DataTypes.STRING, allowNull: true },
   productType: { type: DataTypes.STRING, allowNull: true },
+  bundleType: { type: DataTypes.STRING, defaultValue: 'VIRTUAL', allowNull: true },
   unitOfMeasure: { type: DataTypes.STRING, allowNull: true },
   price: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },
   costPrice: { type: DataTypes.DECIMAL(12, 2), allowNull: true },

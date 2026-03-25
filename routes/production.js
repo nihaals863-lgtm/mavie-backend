@@ -14,11 +14,17 @@ router.put('/formulas/:id', authenticate, requireRole(...prodRoles), formulaCont
 router.delete('/formulas/:id', authenticate, requireRole(...prodRoles), formulaController.remove);
 
 // Production Orders
-router.get('/', authenticate, requireRole(...prodRoles, 'picker', 'packer'), productionController.list);
+router.get('/', authenticate, requireRole(...prodRoles, 'picker', 'packer', 'viewer'), productionController.list);
 router.post('/', authenticate, requireRole(...prodRoles), productionController.create);
 router.post('/:id/validate-stock', authenticate, requireRole(...prodRoles), productionController.validateStock);
 router.post('/:id/start', authenticate, requireRole(...prodRoles), productionController.startProduction);
 router.post('/:id/complete', authenticate, requireRole(...prodRoles), productionController.complete);
 router.delete('/:id', authenticate, requireRole(...prodRoles), productionController.remove);
+
+// Areas
+router.get('/areas', authenticate, requireRole(...prodRoles, 'viewer'), productionController.listAreas);
+router.post('/areas', authenticate, requireRole(...prodRoles), productionController.createArea);
+router.put('/areas/:id', authenticate, requireRole(...prodRoles), productionController.updateArea);
+router.delete('/areas/:id', authenticate, requireRole(...prodRoles), productionController.removeArea);
 
 module.exports = router;
