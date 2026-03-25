@@ -1,21 +1,8 @@
 const { ProductionFormula, ProductionFormulaItem, Product } = require('../models');
 
 async function list(user, query = {}) {
-    const { search } = query;
-    const { Op } = require('sequelize');
-
-    const where = { companyId: user.companyId };
-    
-    if (search) {
-        where[Op.or] = [
-            { name: { [Op.like]: `%${search}%` } },
-            { '$Product.name$': { [Op.like]: `%${search}%` } },
-            { '$Product.sku$': { [Op.like]: `%${search}%` } }
-        ];
-    }
-
     return await ProductionFormula.findAll({
-        where,
+        where: { companyId: user.companyId },
         include: [
             { model: Product },
             {

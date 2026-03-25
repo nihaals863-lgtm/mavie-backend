@@ -110,7 +110,9 @@ async function listProducts(reqUser, query = {}) {
   const companyId = reqUser.companyId || (query.companyId && typeof query.companyId !== 'object' ? query.companyId : null);
   if (companyId) {
     try {
-      const bundleProducts = products.filter(p => (p.productType === 'BUNDLE' || p.productType === 'MULTICOMBO') && (p.bundleType === 'VIRTUAL' || !p.bundleType));
+      const { Bundle, BundleItem, ProductStock } = require('../models');
+      const { Op } = require('sequelize');
+      const bundleProducts = products.filter(p => p.productType === 'BUNDLE' || p.productType === 'MULTICOMBO');
 
       for (const p of bundleProducts) {
         const b = await Bundle.findOne({ where: { sku: p.sku, companyId }, include: [{ model: BundleItem }] });
@@ -188,93 +190,6 @@ async function getProductById(id, reqUser) {
   }
 
   return plain;
-}
-
-async function duplicateProduct(id, reqUser) {
-  const original = await getProductById(id, reqUser);
-  if (!original) throw new Error('Product not found');
-
-  const { ProductionFormula, ProductionFormulaItem, Bundle, BundleItem } = require('../models');
-
-  // Generate unique SKU
-  const timestamp = Date.now().toString(36).toUpperCase();
-  const newSku = `${original.sku}-COPY-${timestamp}`;
-  const newName = `Copy of ${original.name}`;
-
-  const productData = {
-    ...original,
-    id: undefined, // Let DB generate new ID
-    sku: newSku,
-    name: newName,
-    barcode: original.barcode ? `${original.barcode}-${timestamp}` : null,
-    createdAt: undefined,
-    updatedAt: undefined,
-    companyId: original.companyId || reqUser.companyId,
-  };
-
-  // Create the new product
-  const newProduct = await Product.create(productData);
-
-  // 1. Duplicate Bundle logic if applicable
-  if (original.productType === 'BUNDLE' || original.productType === 'MULTICOMBO') {
-    const originalBundle = await Bundle.findOne({
-      where: { companyId: original.companyId, sku: original.sku },
-      include: [{ model: BundleItem }]
-    });
-
-    if (originalBundle) {
-      const newBundle = await Bundle.create({
-        companyId: originalBundle.companyId,
-        productId: newProduct.id,
-        name: newName,
-        sku: newSku,
-        barcode: productData.barcode,
-        description: originalBundle.description,
-        status: originalBundle.status,
-      });
-
-      if (originalBundle.BundleItems?.length) {
-        const newItems = originalBundle.BundleItems.map(item => ({
-          bundleId: newBundle.id,
-          productId: item.productId,
-          quantity: item.quantity,
-          unit: item.unit,
-          notes: item.notes,
-        }));
-        await BundleItem.bulkCreate(newItems);
-      }
-    }
-  }
-
-  // 2. Duplicate Production Formulas
-  const originalFormulas = await ProductionFormula.findAll({
-    where: { productId: id },
-    include: [{ model: ProductionFormulaItem }]
-  });
-
-  for (const formula of originalFormulas) {
-    const newFormula = await ProductionFormula.create({
-      companyId: formula.companyId,
-      productId: newProduct.id,
-      name: formula.name,
-      description: formula.description,
-      isDefault: formula.isDefault,
-      status: formula.status,
-    });
-
-    if (formula.ProductionFormulaItems?.length) {
-      const newFItems = formula.ProductionFormulaItems.map(item => ({
-        formulaId: newFormula.id,
-        productId: item.productId,
-        quantityPerUnit: item.quantityPerUnit,
-        unit: item.unit,
-        wastePercentage: item.wastePercentage,
-      }));
-      await ProductionFormulaItem.bulkCreate(newFItems);
-    }
-  }
-
-  return getProductById(newProduct.id, reqUser);
 }
 
 async function createProduct(data, reqUser) {
@@ -1225,20 +1140,11 @@ async function createAdjustment(data, reqUser) {
       if (p) componentDetails.push({ name: p.name, sku: p.sku, quantity: Number(bItem.quantity) * qty });
     }
 
-    // [REAL BUNDLE] If it is a real bundle, we ALSO deduct the parent bundle stock
-    if (product.bundleType === 'REAL') {
-        let bStock = await ProductStock.findOne({ where: { productId: productId, warehouseId: warehouseId || null } });
-        if (bStock) {
-            if (type === 'INCREASE') await bStock.increment('quantity', { by: qty });
-            else await bStock.decrement('quantity', { by: qty });
-        } else if (type === 'INCREASE') {
-            await ProductStock.create({
-                productId: productId,
-                warehouseId: warehouseId || 1,
-                quantity: qty,
-                status: 'ACTIVE'
-            });
-        }
+    // [NEW] Also adjust static stock for the Bundle Product itself if it exists
+    const bStock = await ProductStock.findOne({ where: { productId: productId, warehouseId: warehouseId || null } });
+    if (bStock) {
+      if (type === 'INCREASE') await bStock.increment('quantity', { by: qty });
+      else await bStock.decrement('quantity', { by: qty });
     }
 
     return InventoryAdjustment.findByPk(adjustment.id, {

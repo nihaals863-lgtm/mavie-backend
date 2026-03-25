@@ -12,11 +12,6 @@ const ProductionOrder = sequelize.define('ProductionOrder', {
         allowNull: false,
         field: 'company_id'
     },
-    orderNumber: {
-        type: DataTypes.STRING,
-        allowNull: true,
-        field: 'order_number'
-    },
     productId: {
         type: DataTypes.INTEGER,
         allowNull: true, // Should be null for multi-product orders (if any)

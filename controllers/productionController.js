@@ -59,51 +59,11 @@ async function remove(req, res, next) {
     }
 }
 
-async function listAreas(req, res, next) {
-    try {
-        const data = await productionService.listAreas(req.user);
-        res.json({ success: true, data });
-    } catch (err) {
-        next(err);
-    }
-}
-
-async function createArea(req, res, next) {
-    try {
-        const data = await productionService.createArea(req.body, req.user);
-        res.status(201).json({ success: true, data });
-    } catch (err) {
-        next(err);
-    }
-}
-
-async function updateArea(req, res, next) {
-    try {
-        const data = await productionService.updateArea(req.params.id, req.body, req.user);
-        res.json({ success: true, data });
-    } catch (err) {
-        next(err);
-    }
-}
-
-async function removeArea(req, res, next) {
-    try {
-        const data = await productionService.removeArea(req.params.id, req.user);
-        res.json({ success: true, data });
-    } catch (err) {
-        res.status(400).json({ success: false, message: err.message });
-    }
-}
-
 module.exports = {
     list,
     create,
     validateStock,
     startProduction,
     complete,
-    remove,
-    listAreas,
-    createArea,
-    updateArea,
-    removeArea
+    remove
 };

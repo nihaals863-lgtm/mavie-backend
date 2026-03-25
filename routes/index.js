@@ -22,7 +22,6 @@ const goodsReceivingRoutes = require('./goodsReceiving');
 const replenishmentRoutes = require('./replenishment');
 const returnRoutes = require('./returnRoutes');
 const vatCodeRoutes = require('./vatCodeRoutes');
-const productionRoutes = require('./production');
 const labelsController = require('../controllers/labelsController');
 const searchController = require('../controllers/searchController');
 
@@ -51,7 +50,6 @@ router.use('/api/goods-receiving', goodsReceivingRoutes);
 router.use('/api/replenishment', replenishmentRoutes);
 router.use('/api/returns', returnRoutes);
 router.use('/api/vat-codes', vatCodeRoutes);
-router.use('/api/production', productionRoutes);
 
 // Notifications
 router.get('/api/notifications', authenticate, notificationController.list);

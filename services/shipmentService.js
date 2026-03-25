@@ -112,7 +112,7 @@ async function update(id, data, reqUser) {
               await deductProductStock(partPid, partQty, order.companyId, order.id);
             }
             deductionCount++;
-            if (product.bundleType !== 'REAL') continue; // Skip main product deduction for VIRTUAL bundles
+            continue; // Skip main product deduction for bundles
           }
         }
 
@@ -172,7 +172,7 @@ async function deductStockForShipment(shipmentId, reqUser) {
             await deductProductStock(partPid, partQty, order.companyId, order.id);
           }
           deducted += 1;
-          if (product.bundleType !== 'REAL') continue;
+          continue;
         }
       }
 
@@ -282,8 +282,9 @@ async function deductProductStock(pid, qty, companyId, salesOrderId) {
         const res = await deductProductStock(bItem.productId, partQty, companyId, salesOrderId);
         if (!res) allSuccess = false;
       }
-      if (product.bundleType !== 'REAL') return allSuccess;
+      return allSuccess;
     }
+    return false;
   }
 
   // REGULAR PRODUCT LOGIC
