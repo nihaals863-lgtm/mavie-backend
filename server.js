@@ -205,26 +205,8 @@ async function start() {
         });
         console.log('[Migration] Added unit_of_measure column to products table.');
       }
-      
-      if (!tableDescription.bundle_type && !tableDescription.bundleType) {
-        await queryInterface.addColumn('products', 'bundle_type', {
-          type: require('sequelize').DataTypes.STRING,
-          allowNull: true,
-          defaultValue: 'VIRTUAL',
-        });
-        console.log('[Migration] Added bundle_type column to products table.');
-      }
-      
-      if (!tableDescription.product_type && !tableDescription.productType) {
-        await queryInterface.addColumn('products', 'product_type', {
-          type: require('sequelize').DataTypes.STRING,
-          allowNull: true,
-          defaultValue: 'SIMPLE',
-        });
-        console.log('[Migration] Added product_type column to products table.');
-      }
     } catch (migrationErr) {
-      console.error('[Migration Error] Failure updating products table:', migrationErr.message);
+      console.error('[Migration Error] Failure adding unit_of_measure to products:', migrationErr.message);
     }
 
     // Safe migration: ensure currency column exists in products
