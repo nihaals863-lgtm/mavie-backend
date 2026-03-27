@@ -481,6 +481,74 @@ async function start() {
       console.warn('[Migration Warning] Could not create notifications table:', err.message);
     }
 
+    // Safe migration: ensure alternative_skus exists in products
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('products');
+      if (!tableDescription.alternative_skus && !tableDescription.alternativeSkus) {
+        await queryInterface.addColumn('products', 'alternative_skus', {
+          type: require('sequelize').DataTypes.JSON,
+          allowNull: true,
+        });
+        console.log('[Migration] Added alternative_skus to products.');
+      }
+    } catch (err) {
+      console.warn('[Migration Warning] Could not add alternative_skus to products:', err.message);
+    }
+
+    // Safe migration: ensure notes and warehouse_id exists in production_orders
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('production_orders');
+      if (!tableDescription.notes) {
+        await queryInterface.addColumn('production_orders', 'notes', {
+          type: require('sequelize').DataTypes.TEXT,
+          allowNull: true,
+        });
+      }
+      if (!tableDescription.warehouse_id) {
+        await queryInterface.addColumn('production_orders', 'warehouse_id', {
+          type: require('sequelize').DataTypes.INTEGER,
+          allowNull: true,
+        });
+      }
+    } catch (err) {
+      console.warn('[Migration Warning] Could not add notes/warehouse_id to production_orders:', err.message);
+    }
+
+    // Safe migration: ensure notes exists in sales_orders, movements, inventory_adjustments
+    const tablesWithNotes = ['sales_orders', 'movements', 'inventory_adjustments'];
+    for (const table of tablesWithNotes) {
+      try {
+        const queryInterface = sequelize.getQueryInterface();
+        const tableDescription = await queryInterface.describeTable(table);
+        if (!tableDescription.notes) {
+          await queryInterface.addColumn(table, 'notes', {
+            type: require('sequelize').DataTypes.TEXT,
+            allowNull: true,
+          });
+          console.log(`[Migration] Added notes to ${table}.`);
+        }
+      } catch (err) {
+        console.warn(`[Migration Warning] Could not add notes to ${table}:`, err.message);
+      }
+    }
+
+    // Safe migration: ensure description exists in production_formulas
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('production_formulas');
+      if (!tableDescription.description) {
+        await queryInterface.addColumn('production_formulas', 'description', {
+          type: require('sequelize').DataTypes.TEXT,
+          allowNull: true,
+        });
+        console.log('[Migration] Added description to production_formulas.');
+      }
+    } catch (err) {
+      console.warn('[Migration Warning] Could not add description to production_formulas:', err.message);
+    }
+
     if (dialect === 'sqlite') {
       await sequelize.query('PRAGMA foreign_keys = ON');
     }
