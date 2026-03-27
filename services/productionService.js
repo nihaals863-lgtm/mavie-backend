@@ -7,6 +7,7 @@ const {
     ProductionFormulaItem,
     InventoryAdjustment,
     Movement,
+    Warehouse,
     sequelize
 } = require('../models');
 const { Op } = require('sequelize');
@@ -77,16 +78,32 @@ async function create(data, user) {
             `Please go to Manufacturing → Formulas and create a formula for this product first.`
         );
 
+        // 1. Generate Order Number based on Area
+        // Default to formula's area/warehouse if not provided
+        const finalAreaId = Number(productionAreaId) || Number(formula.productionAreaId) || 1;
+        const finalWarehouseId = warehouseId || formula.warehouseId;
+
+        if (!finalWarehouseId) throw new Error('No target warehouse specified for production.');
+
+        let prefix = 'PROD';
+        if (finalAreaId === 1) prefix = 'P';
+        else if (finalAreaId === 2) prefix = 'C';
+        else if (finalAreaId === 3) prefix = 'L';
+
+        const count = await ProductionOrder.count({ where: { companyId: user.companyId, orderNumber: { [Op.like]: `${prefix}-%` } } });
+        const orderNumber = `${prefix}-${String(count + 1).padStart(3, '0')}`;
+
         const order = await ProductionOrder.create({
             companyId: user.companyId,
             productId,
             formulaId: formula.id,
-            warehouseId, // Target Warehouse for finished goods
-            targetWarehouseId: warehouseId,
+            warehouseId: finalWarehouseId, // Target Warehouse for finished goods
+            targetWarehouseId: finalWarehouseId,
             quantityGoal,
-            productionAreaId,
+            productionAreaId: finalAreaId,
             notes,
-            status: 'DRAFT'
+            status: 'DRAFT',
+            orderNumber: orderNumber
         }, { transaction: t });
 
         // Calculate and create required items
@@ -160,8 +177,8 @@ async function validateStock(orderId, user, transaction = null) {
     console.log(`[validateStock] allAvailable: ${allAvailable}, currentStatus: ${currentStatus}`);
 
     if (allAvailable && currentStatus === 'DRAFT') {
-        console.log(`[validateStock] Updating status of #${orderId} to VALIDATED`);
-        order.status = 'VALIDATED';
+        console.log(`[validateStock] Updating status of #${orderId} to STOCK_READY`);
+        order.status = 'STOCK_READY';
         await order.save({ transaction });
         // Force refresh if no transaction (to be safe for immediate fetch)
         if (!transaction) await order.reload();
@@ -283,9 +300,9 @@ async function startProduction(orderId, user) {
             }
         }
 
-        if (currentStatus !== 'VALIDATED') {
+        if (currentStatus !== 'ACCEPTED' && currentStatus !== 'VALIDATED') {
             console.error(`[startProduction] Invalid status for #${orderId}: ${currentStatus}`);
-            throw new Error(`Order must be in VALIDATED status to start production (Current: ${currentStatus}). Please click Validate Stock first.`);
+            throw new Error(`Order must be in ACCEPTED status to start production (Current: ${currentStatus}). Please click Accept Validation first.`);
         }
 
         console.log(`[startProduction] Proceeding with production for Order #${orderId}`);
@@ -368,6 +385,20 @@ async function complete(orderId, user) {
     });
 }
 
+async function acceptValidation(orderId, user) {
+    const order = await ProductionOrder.findByPk(orderId);
+    if (!order) throw new Error('Order not found');
+    if (order.companyId !== user.companyId) throw new Error('Unauthorized');
+
+    if (order.status !== 'STOCK_READY' && order.status !== 'DRAFT' && order.status !== 'VALIDATED') {
+        throw new Error(`Only Stock Ready or Draft orders can be accepted. Current: ${order.status}`);
+    }
+
+    order.status = 'ACCEPTED';
+    await order.save();
+    return order;
+}
+
 async function remove(orderId, user) {
     const order = await ProductionOrder.findByPk(orderId);
     if (!order) throw new Error('Production order not found');
@@ -395,6 +426,7 @@ module.exports = {
     list,
     create,
     validateStock,
+    acceptValidation,
     startProduction,
     complete,
     remove

@@ -14,6 +14,7 @@ async function list(reqUser, query = {}) {
     order: [['createdAt', 'DESC']],
     include: [
       { association: 'Supplier', attributes: ['id', 'name', 'code'] },
+      { association: 'Warehouse', attributes: ['id', 'name', 'code'] },
       { association: 'PurchaseOrderItems', include: [{ association: 'Product', attributes: ['id', 'name', 'sku'] }] },
     ],
   });
@@ -24,6 +25,7 @@ async function getById(id, reqUser) {
   const po = await PurchaseOrder.findByPk(id, {
     include: [
       { association: 'Supplier' },
+      { association: 'Warehouse' },
       { association: 'PurchaseOrderItems', include: ['Product'] },
     ],
   });
@@ -43,14 +45,25 @@ async function create(body, reqUser) {
   const count = await PurchaseOrder.count({ where: { companyId } });
   const poNumber = `PO${String(count + 1).padStart(3, '0')}`;
 
-  const supplier = await Supplier.findByPk(body.supplierId);
+  let supplierId = body.supplierId;
+  if (!supplierId && body.items && body.items.length > 0) {
+    const firstProduct = await Product.findByPk(body.items[0].productId);
+    if (firstProduct && firstProduct.supplierId) {
+      supplierId = firstProduct.supplierId;
+    }
+  }
+
+  if (!supplierId) throw new Error('Supplier ID is required or could not be determined from products');
+
+  const supplier = await Supplier.findByPk(supplierId);
   if (!supplier || supplier.companyId !== companyId) throw new Error('Invalid supplier');
 
   const totalAmount = (body.items || []).reduce((sum, i) => sum + (Number(i.unitPrice) || 0) * (Number(i.quantity) || 0), 0);
 
   const po = await PurchaseOrder.create({
     companyId,
-    supplierId: body.supplierId,
+    supplierId,
+    warehouseId: body.warehouseId || null,
     poNumber,
     status: body.status || 'pending',
     totalAmount,
@@ -79,6 +92,7 @@ async function update(id, body, reqUser) {
   if (po.status !== 'pending' && po.status !== 'draft') throw new Error('Only pending/draft PO can be updated');
 
   if (body.supplierId != null) po.supplierId = body.supplierId;
+  if (body.warehouseId != null) po.warehouseId = body.warehouseId;
   if (body.expectedDelivery != null) po.expectedDelivery = body.expectedDelivery;
   if (body.notes != null) po.notes = body.notes;
   if (body.status != null) po.status = body.status;

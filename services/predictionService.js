@@ -62,9 +62,14 @@ async function getPredictionData(companyId) {
         let suggestedReorder = Math.ceil(needed - currentStock);
         if (suggestedReorder < 0) suggestedReorder = 0;
 
-        // Status
+        // Status prioritized by manual reorder point
         let status = 'HEALTHY';
-        if (daysUntilStockout !== null) {
+        const reorderLevel = Number(p.reorderLevel) || 0;
+        const reorderQty = Number(p.reorderQty) || 0;
+
+        if (reorderLevel > 0 && currentStock <= reorderLevel) {
+            status = 'CRITICAL';
+        } else if (daysUntilStockout !== null) {
             if (daysUntilStockout < leadTime) {
                 status = 'CRITICAL'; // Will run out before new stock arrives
             } else if (daysUntilStockout < (leadTime + safetyStockDays)) {
@@ -72,6 +77,11 @@ async function getPredictionData(companyId) {
             }
         } else if (currentStock === 0) {
             status = 'CRITICAL'; // No stock, no sales (or sales 0)
+        }
+
+        // Use reorderQty if it's set and higher than suggested
+        if (reorderQty > suggestedReorder && status !== 'HEALTHY') {
+            suggestedReorder = reorderQty;
         }
 
         return {

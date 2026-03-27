@@ -17,6 +17,7 @@ router.delete('/formulas/:id', authenticate, requireRole(...prodRoles), formulaC
 router.get('/', authenticate, requireRole(...prodRoles, 'picker', 'packer'), productionController.list);
 router.post('/', authenticate, requireRole(...prodRoles), productionController.create);
 router.post('/:id/validate-stock', authenticate, requireRole(...prodRoles), productionController.validateStock);
+router.post('/:id/accept-validation', authenticate, requireRole(...prodRoles), productionController.acceptValidation);
 router.post('/:id/start', authenticate, requireRole(...prodRoles), productionController.startProduction);
 router.post('/:id/complete', authenticate, requireRole(...prodRoles), productionController.complete);
 router.delete('/:id', authenticate, requireRole(...prodRoles), productionController.remove);

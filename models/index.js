@@ -113,6 +113,8 @@ User.hasMany(Shipment, { foreignKey: 'packedBy' });
 // PurchaseOrder -> PurchaseOrderItem, Supplier
 PurchaseOrder.belongsTo(Supplier, { foreignKey: 'supplierId' });
 Supplier.hasMany(PurchaseOrder, { foreignKey: 'supplierId' });
+PurchaseOrder.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
+Warehouse.hasMany(PurchaseOrder, { foreignKey: 'warehouseId' });
 PurchaseOrder.hasMany(PurchaseOrderItem, { foreignKey: 'purchaseOrderId' });
 PurchaseOrderItem.belongsTo(PurchaseOrder, { foreignKey: 'purchaseOrderId' });
 PurchaseOrderItem.belongsTo(Product, { foreignKey: 'productId' });
@@ -205,6 +207,9 @@ ProductionOrder.belongsTo(Company, { foreignKey: 'companyId' });
 Warehouse.hasMany(ProductionOrder, { foreignKey: 'warehouseId' });
 ProductionOrder.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
 
+Warehouse.hasMany(ProductionOrder, { foreignKey: 'productionAreaId', as: 'AreaOrders' });
+ProductionOrder.belongsTo(Warehouse, { foreignKey: 'productionAreaId', as: 'ProductionArea' });
+
 Product.hasMany(ProductionOrder, { foreignKey: 'productId' });
 ProductionOrder.belongsTo(Product, { foreignKey: 'productId' });
 
@@ -223,6 +228,10 @@ ProductionFormulaItem.belongsTo(ProductionFormula, { foreignKey: 'formulaId' });
 
 ProductionFormulaItem.belongsTo(Product, { foreignKey: 'productId', as: 'RawMaterial' });
 Product.hasMany(ProductionFormulaItem, { foreignKey: 'productId', as: 'FormulaUsage' });
+
+// Formula Routing
+ProductionFormula.belongsTo(Warehouse, { foreignKey: 'warehouseId', as: 'TargetWarehouse' });
+ProductionFormula.belongsTo(Warehouse, { foreignKey: 'productionAreaId', as: 'ProductionArea' });
 
 ProductionOrder.belongsTo(ProductionFormula, { foreignKey: 'formulaId' });
 ProductionFormula.hasMany(ProductionOrder, { foreignKey: 'formulaId' });

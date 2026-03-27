@@ -22,7 +22,7 @@ async function getByProductId(productId, user) {
 }
 
 async function create(data, user) {
-    const { productId, name, description, isDefault, items } = data;
+    const { productId, name, description, isDefault, items, productionAreaId, warehouseId } = data;
 
     // Use transaction
     const { sequelize } = require('../models');
@@ -37,10 +37,13 @@ async function create(data, user) {
 
         const formula = await ProductionFormula.create({
             companyId: user.companyId,
-            productId,
+            productId: productId || null,
             name,
             description,
-            isDefault: isDefault !== undefined ? isDefault : true
+            isDefault: isDefault !== undefined ? isDefault : true,
+            isTemplate: !productId, // Set to true if no product is selected
+            productionAreaId,
+            warehouseId
         }, { transaction: t });
 
         if (items && items.length > 0) {
@@ -60,7 +63,7 @@ async function create(data, user) {
 }
 
 async function update(id, data, user) {
-    const { name, description, isDefault, items } = data;
+    const { name, description, isDefault, items, productionAreaId, warehouseId } = data;
     const { sequelize } = require('../models');
 
     return await sequelize.transaction(async (t) => {
@@ -77,7 +80,7 @@ async function update(id, data, user) {
             });
         }
 
-        await formula.update({ name, description, isDefault }, { transaction: t });
+        await formula.update({ name, description, isDefault, productionAreaId, warehouseId }, { transaction: t });
 
         if (items) {
             await ProductionFormulaItem.destroy({ where: { formulaId: id }, transaction: t });

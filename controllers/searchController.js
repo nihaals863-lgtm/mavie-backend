@@ -37,10 +37,11 @@ async function search(req, res, next) {
                     [Op.or]: [
                         { name: { [Op.like]: term } },
                         { sku: { [Op.like]: term } },
+                        { barcode: { [Op.like]: term } },
                     ],
                 },
                 limit: LIMIT,
-                attributes: ['id', 'name', 'sku'],
+                attributes: ['id', 'name', 'sku', 'barcode'],
             }),
             Customer.findAll({
                 where: {
@@ -60,7 +61,7 @@ async function search(req, res, next) {
             success: true,
             data: {
                 orders: orders.map((o) => ({ id: o.id, orderNumber: o.orderNumber, referenceNumber: o.referenceNumber, status: o.status, totalAmount: o.totalAmount })),
-                products: products.map((p) => ({ id: p.id, name: p.name, sku: p.sku })),
+                products: products.map((p) => ({ id: p.id, name: p.name, sku: p.sku, barcode: p.barcode })),
                 customers: customers.map((c) => ({ id: c.id, name: c.name, email: c.email, code: c.code })),
             },
         });

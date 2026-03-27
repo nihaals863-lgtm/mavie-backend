@@ -99,24 +99,7 @@ async function update(id, data, reqUser) {
         const product = await Product.findByPk(pid);
         if (!product) continue;
 
-        // Bundle logic: if product is a bundle, deduct parts
-        if (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO') {
-          const bundle = await Bundle.findOne({
-            where: { sku: product.sku, companyId: product.companyId },
-            include: [{ model: BundleItem }]
-          });
-          if (bundle && bundle.BundleItems?.length) {
-            for (const bItem of bundle.BundleItems) {
-              const partPid = bItem.productId;
-              const partQty = Number(bItem.quantity) * qty;
-              await deductProductStock(partPid, partQty, order.companyId, order.id);
-            }
-            deductionCount++;
-            continue; // Skip main product deduction for bundles
-          }
-        }
-
-        // Regular product deduction
+        // Deduct stock (Hybrid logic inside deductProductStock handles regular, virtual, and physical bundles)
         const success = await deductProductStock(pid, qty, order.companyId, order.id);
         if (success) deductionCount++;
       } catch (err) {
@@ -159,22 +142,6 @@ async function deductStockForShipment(shipmentId, reqUser) {
     try {
       const product = await Product.findByPk(pid);
       if (!product) continue;
-
-      if (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO') {
-        const bundle = await Bundle.findOne({
-          where: { sku: product.sku, companyId: product.companyId },
-          include: [{ model: BundleItem }]
-        });
-        if (bundle && bundle.BundleItems?.length) {
-          for (const bItem of bundle.BundleItems) {
-            const partPid = bItem.productId;
-            const partQty = Number(bItem.quantity) * qty;
-            await deductProductStock(partPid, partQty, order.companyId, order.id);
-          }
-          deducted += 1;
-          continue;
-        }
-      }
 
       const success = await deductProductStock(pid, qty, order.companyId, order.id);
       if (success) deducted += 1;
@@ -267,54 +234,61 @@ async function remove(id, reqUser) {
 
 async function deductProductStock(pid, qty, companyId, salesOrderId) {
   const product = await Product.findByPk(pid);
-  if (!product) return false;
+  if (!product || qty <= 0) return false;
 
-  // RECURSIVE BUNDLE LOGIC
-  if (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO') {
+  let finalSuccess = false;
+  const isBundle = (product.productType === 'BUNDLE' || product.productType === 'MULTICOMBO');
+  const isPhysical = !!product.isPhysicalBundle;
+
+  // 1. If it's a REGULAR product or a PHYSICAL bundle, deduct its own physical stock
+  if (!isBundle || isPhysical) {
+    let stock = null;
+    const pickList = await PickList.findOne({ where: { salesOrderId }, attributes: ['warehouseId'] });
+    if (pickList && pickList.warehouseId) {
+      stock = await ProductStock.findOne({ where: { productId: pid, warehouseId: pickList.warehouseId } });
+    }
+    if (!stock && companyId) {
+      const companyWarehouses = await Warehouse.findAll({ where: { companyId }, attributes: ['id'] });
+      const warehouseIds = (companyWarehouses || []).map((w) => w.id);
+      if (warehouseIds.length > 0) {
+        stock = await ProductStock.findOne({ where: { productId: pid, warehouseId: { [Op.in]: warehouseIds } } });
+      }
+    }
+    if (!stock) stock = await ProductStock.findOne({ where: { productId: pid } });
+    
+    if (stock) {
+      const prevQty = Number(stock.quantity) || 0;
+      const prevRes = Number(stock.reserved) || 0;
+      const deductQty = Math.min(qty, prevQty);
+      if (deductQty > 0) {
+        await stock.decrement('quantity', { by: deductQty });
+        await stock.update({ updatedAt: new Date() });
+        const newRes = Math.max(0, prevRes - deductQty);
+        if (newRes !== prevRes) await stock.update({ reserved: newRes });
+        finalSuccess = true;
+      }
+    }
+  }
+
+  // 2. If it's ANY bundle (Virtual or Physical), ALSO deduct components
+  if (isBundle) {
     const bundle = await Bundle.findOne({
       where: { sku: product.sku, companyId: product.companyId },
       include: [{ model: BundleItem }]
     });
     if (bundle && bundle.BundleItems?.length) {
-      let allSuccess = true;
       for (const bItem of bundle.BundleItems) {
+        const partPid = bItem.productId;
         const partQty = Number(bItem.quantity) * qty;
-        const res = await deductProductStock(bItem.productId, partQty, companyId, salesOrderId);
-        if (!res) allSuccess = false;
+        // Recursive call (which will handle sub-bundles too)
+        await deductProductStock(partPid, partQty, companyId, salesOrderId);
       }
-      return allSuccess;
+      // If it's a virtual bundle (not physical), the deduction is considered successful based on components
+      if (!isPhysical) finalSuccess = true;
     }
-    return false;
   }
 
-  // REGULAR PRODUCT LOGIC
-  let stock = null;
-  const pickList = await PickList.findOne({ where: { salesOrderId }, attributes: ['warehouseId'] });
-  if (pickList && pickList.warehouseId) {
-    stock = await ProductStock.findOne({ where: { productId: pid, warehouseId: pickList.warehouseId } });
-  }
-  if (!stock && companyId) {
-    const companyWarehouses = await Warehouse.findAll({ where: { companyId }, attributes: ['id'] });
-    const warehouseIds = (companyWarehouses || []).map((w) => w.id);
-    if (warehouseIds.length > 0) {
-      stock = await ProductStock.findOne({ where: { productId: pid, warehouseId: { [Op.in]: warehouseIds } } });
-    }
-  }
-  if (!stock) stock = await ProductStock.findOne({ where: { productId: pid } });
-  
-  if (stock) {
-    const prevQty = Number(stock.quantity) || 0;
-    const prevRes = Number(stock.reserved) || 0;
-    const deductQty = Math.min(qty, prevQty);
-    if (deductQty > 0) {
-      await stock.decrement('quantity', { by: deductQty });
-      await stock.update({ updatedAt: new Date() });
-      const newRes = Math.max(0, prevRes - deductQty);
-      if (newRes !== prevRes) await stock.update({ reserved: newRes });
-      return true;
-    }
-  }
-  return false;
+  return finalSuccess;
 }
 
 module.exports = { list, getById, create, update, deductStockForShipment, prepareShipment, remove, deductProductStock };

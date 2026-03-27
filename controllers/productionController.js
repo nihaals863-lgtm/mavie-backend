@@ -31,6 +31,15 @@ async function validateStock(req, res, next) {
     }
 }
 
+async function acceptValidation(req, res, next) {
+    try {
+        const data = await productionService.acceptValidation(req.params.id, req.user);
+        res.json({ success: true, data });
+    } catch (err) {
+        next(err);
+    }
+}
+
 async function startProduction(req, res, next) {
     try {
         const data = await productionService.startProduction(req.params.id, req.user);
@@ -63,6 +72,7 @@ module.exports = {
     list,
     create,
     validateStock,
+    acceptValidation,
     startProduction,
     complete,
     remove

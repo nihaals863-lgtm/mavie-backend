@@ -64,6 +64,11 @@ const ProductionOrder = sequelize.define('ProductionOrder', {
     notes: {
         type: DataTypes.TEXT,
         allowNull: true
+    },
+    orderNumber: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        field: 'order_number'
     }
 }, {
     tableName: 'production_orders',

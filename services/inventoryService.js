@@ -112,7 +112,8 @@ async function listProducts(reqUser, query = {}) {
     try {
       const { Bundle, BundleItem, ProductStock } = require('../models');
       const { Op } = require('sequelize');
-      const bundleProducts = products.filter(p => p.productType === 'BUNDLE' || p.productType === 'MULTICOMBO');
+      // Only calculate virtual stocks if NOT a physical bundle
+      const bundleProducts = products.filter(p => (p.productType === 'BUNDLE' || p.productType === 'MULTICOMBO') && !p.isPhysicalBundle);
 
       for (const p of bundleProducts) {
         const b = await Bundle.findOne({ where: { sku: p.sku, companyId }, include: [{ model: BundleItem }] });
@@ -127,8 +128,10 @@ async function listProducts(reqUser, query = {}) {
         }
         if (minAssembly === Infinity) minAssembly = 0;
 
-        if (minAssembly > 0) {
-          const stocks = Array.isArray(p.ProductStocks) ? p.ProductStocks : [];
+        // Ensure we don't duplicate existing virtual stock entries if we re-run this logic
+        const stocks = Array.isArray(p.ProductStocks) ? p.ProductStocks : [];
+        const virtualStockExists = stocks.some(s => s.isVirtual);
+        if (!virtualStockExists && minAssembly > 0) {
           stocks.push({ quantity: minAssembly, warehouseId: null, isVirtual: true });
           p.ProductStocks = stocks;
         }
@@ -237,6 +240,7 @@ async function createProduct(data, reqUser) {
     supplierProducts: Array.isArray(data.supplierProducts) ? data.supplierProducts : null,
     alternativeSkus: Array.isArray(data.alternativeSkus) ? data.alternativeSkus : null,
     currency: data.currency || (reqUser.currencyPreference) || 'USD',
+    defaultProductionAreaId: data.defaultProductionAreaId || null,
   };
   console.log('[DEBUG_SERVICE] Creating Product Payload:', JSON.stringify(payload, null, 2));
   const created = await Product.create(payload);
@@ -426,6 +430,7 @@ async function updateProduct(id, data, reqUser) {
   if (data.supplierProducts !== undefined) upd.supplierProducts = Array.isArray(data.supplierProducts) ? data.supplierProducts : product.supplierProducts;
   if (data.alternativeSkus !== undefined) upd.alternativeSkus = Array.isArray(data.alternativeSkus) ? data.alternativeSkus : product.alternativeSkus;
   if (data.currency !== undefined) upd.currency = data.currency;
+  if (data.defaultProductionAreaId !== undefined) upd.defaultProductionAreaId = data.defaultProductionAreaId;
   if (Object.keys(upd).length === 0) return normalizeProductJson(product);
   console.log('[DEBUG_SERVICE] Final Update Object:', JSON.stringify(upd, null, 2));
   await product.update(upd);
@@ -563,6 +568,24 @@ async function updateProduct(id, data, reqUser) {
     ],
   });
   return getProductById(id, reqUser);
+}
+
+async function duplicateProduct(id, reqUser) {
+  const original = await Product.findByPk(id);
+  if (!original) throw new Error('Product not found');
+  if (reqUser.role !== 'super_admin' && original.companyId !== reqUser.companyId) throw new Error('Product not found');
+
+  const plain = original.get({ plain: true });
+  delete plain.id;
+  delete plain.createdAt;
+  delete plain.updatedAt;
+  
+  // Append "-copy" to SKU and name to make it unique and recognizable
+  plain.sku = `${plain.sku}-copy-${Date.now()}`;
+  plain.name = `${plain.name} (Copy)`;
+  
+  const duplicated = await Product.create(plain);
+  return getProductById(duplicated.id, reqUser);
 }
 
 async function addAlternativeSku(productId, payload, reqUser) {
@@ -716,13 +739,17 @@ async function listStock(reqUser, query = {}) {
         updatedAt: new Date()
       };
 
-      // MERGE or SUPPRESS duplicates that have static rows
-      const existingIdx = stocks.findIndex(s => s.productId === bProd.id && !s.isVirtual);
-      if (existingIdx !== -1) {
-        // Augment with Virtual Quantity rather than pushing duplicate row
-        stocks[existingIdx] = stocks[existingIdx].toJSON ? stocks[existingIdx].toJSON() : stocks[existingIdx];
-        stocks[existingIdx].virtualQuantity = minAssembly;
-      } else {
+      // MERGE or SUPPRESS: Augment ALL static rows with virtual info instead of pushing duplicates
+      let foundInOriginal = false;
+      stocks.forEach((s, idx) => {
+        if (s.productId === bProd.id && !s.isVirtual) {
+          stocks[idx] = s.toJSON ? s.toJSON() : { ...s };
+          stocks[idx].virtualQuantity = minAssembly;
+          foundInOriginal = true;
+        }
+      });
+      
+      if (!foundInOriginal) {
         stocks.push(virtualRecord);
       }
     }
@@ -1911,6 +1938,7 @@ module.exports = {
   createProduct,
   bulkCreateProducts,
   updateProduct,
+  duplicateProduct,
   addAlternativeSku,
   removeProduct,
   createCategory,

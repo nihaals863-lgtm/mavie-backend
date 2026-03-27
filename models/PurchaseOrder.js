@@ -5,6 +5,7 @@ const PurchaseOrder = sequelize.define('PurchaseOrder', {
   id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
   companyId: { type: DataTypes.INTEGER, allowNull: false },
   supplierId: { type: DataTypes.INTEGER, allowNull: false },
+  warehouseId: { type: DataTypes.INTEGER, allowNull: true },
   poNumber: { type: DataTypes.STRING, allowNull: false },
   status: {
     type: DataTypes.STRING,

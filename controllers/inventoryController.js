@@ -484,12 +484,23 @@ async function removeMovement(req, res, next) {
   }
 }
 
+async function duplicateProduct(req, res, next) {
+  try {
+    const data = await inventoryService.duplicateProduct(req.params.id, req.user);
+    res.status(201).json({ success: true, data });
+  } catch (err) {
+    if (err.message === 'Product not found') return res.status(404).json({ success: false, message: err.message });
+    next(err);
+  }
+}
+
 module.exports = {
   listProducts,
   getProduct,
   createProduct,
   bulkCreateProducts,
   updateProduct,
+  duplicateProduct,
   addAlternativeSku,
   removeProduct,
   listCategories,

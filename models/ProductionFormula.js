@@ -14,7 +14,7 @@ const ProductionFormula = sequelize.define('ProductionFormula', {
     },
     productId: {
         type: DataTypes.INTEGER, // The finished product this formula makes
-        allowNull: false,
+        allowNull: true,
         field: 'product_id'
     },
     name: {
@@ -33,6 +33,21 @@ const ProductionFormula = sequelize.define('ProductionFormula', {
     status: {
         type: DataTypes.STRING,
         defaultValue: 'ACTIVE'
+    },
+    isTemplate: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        field: 'is_template'
+    },
+    productionAreaId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        field: 'production_area_id'
+    },
+    warehouseId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        field: 'warehouse_id'
     }
 }, {
     tableName: 'production_formulas',

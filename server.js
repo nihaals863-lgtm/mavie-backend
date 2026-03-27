@@ -364,6 +364,97 @@ async function start() {
       console.error('[Migration Error] Failure during quantity decimal migration:', err.message);
     }
 
+    // Safe migration: Add is_physical_bundle to products
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('products');
+      if (!tableDescription.is_physical_bundle && !tableDescription.isPhysicalBundle) {
+        await queryInterface.addColumn('products', 'is_physical_bundle', {
+          type: require('sequelize').DataTypes.BOOLEAN,
+          allowNull: false,
+          defaultValue: false,
+        });
+        console.log('[Migration] Added is_physical_bundle column to products.');
+      }
+    } catch (err) {
+      console.warn('[Migration Warning] Could not add is_physical_bundle to products:', err.message);
+    }
+
+    // Safe migration: Add default_production_area_id to products
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('products');
+      if (!tableDescription.default_production_area_id && !tableDescription.defaultProductionAreaId) {
+        await queryInterface.addColumn('products', 'default_production_area_id', {
+          type: require('sequelize').DataTypes.INTEGER,
+          allowNull: true,
+        });
+        console.log('[Migration] Added default_production_area_id to products.');
+      }
+    } catch (err) {
+      console.warn('[Migration Warning] Could not add default_production_area_id to products:', err.message);
+    }
+
+    // Safe migration: Add order_number to production_orders
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('production_orders');
+      if (!tableDescription.order_number && !tableDescription.orderNumber) {
+        await queryInterface.addColumn('production_orders', 'order_number', {
+          type: require('sequelize').DataTypes.STRING,
+          allowNull: true,
+        });
+        console.log('[Migration] Added order_number column to production_orders.');
+      }
+    } catch (err) {
+      console.warn('[Migration Warning] Could not add order_number to production_orders:', err.message);
+    }
+
+    // Safe migration: Add is_template to production_formulas
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('production_formulas');
+      if (!tableDescription.is_template && !tableDescription.isTemplate) {
+        await queryInterface.addColumn('production_formulas', 'is_template', {
+          type: require('sequelize').DataTypes.BOOLEAN,
+          allowNull: false,
+          defaultValue: false,
+        });
+        console.log('[Migration] Added is_template column to production_formulas.');
+      }
+      if (!tableDescription.production_area_id && !tableDescription.productionAreaId) {
+        await queryInterface.addColumn('production_formulas', 'production_area_id', {
+           type: require('sequelize').DataTypes.INTEGER,
+           allowNull: true,
+        });
+        console.log('[Migration] Added production_area_id column to production_formulas.');
+      }
+      if (!tableDescription.warehouse_id && !tableDescription.warehouseId) {
+        await queryInterface.addColumn('production_formulas', 'warehouse_id', {
+           type: require('sequelize').DataTypes.INTEGER,
+           allowNull: true,
+        });
+        console.log('[Migration] Added warehouse_id column to production_formulas.');
+      }
+    } catch (err) {
+      console.warn('[Migration Warning] Could not add columns to production_formulas:', err.message);
+    }
+
+    // Safe migration: Ensure production_order_id in production_order_items
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('production_order_items');
+      if (!tableDescription.production_order_id && !tableDescription.productionOrderId) {
+        await queryInterface.addColumn('production_order_items', 'production_order_id', {
+          type: require('sequelize').DataTypes.INTEGER,
+          allowNull: false,
+        });
+        console.log('[Migration] Fixed missing production_order_id in production_order_items.');
+      }
+    } catch (err) {
+      console.warn('[Migration Warning] Could not fix production_order_items:', err.message);
+    }
+
     // Safe migration: notifications table (if not handled by alter)
     try {
       const queryInterface = sequelize.getQueryInterface();
