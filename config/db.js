@@ -1,5 +1,5 @@
-require('dotenv').config();
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const { Sequelize } = require('sequelize');
 
 // Database name: warehouse_wms (MySQL ya SQLite file)

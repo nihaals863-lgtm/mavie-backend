@@ -106,37 +106,11 @@ async function listProducts(reqUser, query = {}) {
 
   // [NEW] Calculate and augment virtual quantities for Products views
   products = products.map(normalizeProductJson);
+  const { augmentProductStocks } = require('../utils/stockAugmenter');
 
   const companyId = reqUser.companyId || (query.companyId && typeof query.companyId !== 'object' ? query.companyId : null);
   if (companyId) {
-    try {
-      const { Bundle, BundleItem, ProductStock } = require('../models');
-      const { Op } = require('sequelize');
-      // Only calculate virtual stocks if NOT a physical bundle
-      const bundleProducts = products.filter(p => (p.productType === 'BUNDLE' || p.productType === 'MULTICOMBO') && !p.isPhysicalBundle);
-
-      for (const p of bundleProducts) {
-        const b = await Bundle.findOne({ where: { sku: p.sku, companyId }, include: [{ model: BundleItem }] });
-        if (!b || !b.BundleItems || b.BundleItems.length === 0) continue;
-
-        let minAssembly = Infinity;
-        for (const item of b.BundleItems) {
-          const pStocks = await ProductStock.findAll({ where: { productId: item.productId } });
-          const avail = pStocks.reduce((sum, s) => sum + (Number(s.quantity || 0) - Number(s.reserved || 0)), 0);
-          const possible = Math.floor(avail / Number(item.quantity || 1));
-          if (possible < minAssembly) minAssembly = possible;
-        }
-        if (minAssembly === Infinity) minAssembly = 0;
-
-        // Ensure we don't duplicate existing virtual stock entries if we re-run this logic
-        const stocks = Array.isArray(p.ProductStocks) ? p.ProductStocks : [];
-        const virtualStockExists = stocks.some(s => s.isVirtual);
-        if (!virtualStockExists && minAssembly > 0) {
-          stocks.push({ quantity: minAssembly, warehouseId: null, isVirtual: true });
-          p.ProductStocks = stocks;
-        }
-      }
-    } catch (_) { }
+     products = await augmentProductStocks(products, companyId);
   }
 
   return products;

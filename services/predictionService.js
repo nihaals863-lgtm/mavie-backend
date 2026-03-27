@@ -4,43 +4,51 @@ const dayjs = require('dayjs');
 
 async function getPredictionData(companyId) {
     // 1. Fetch all active products
-    const products = await Product.findAll({
+    let products = await Product.findAll({
         where: { companyId, status: 'ACTIVE' },
         include: [{ model: ProductStock, as: 'ProductStocks' }]
     });
+
+    // [NEW] Augment with virtual stock (Bundles/Formulas)
+    const { augmentProductStocks } = require('../utils/stockAugmenter');
+    products = await augmentProductStocks(products, companyId);
 
     // 2. Define date range for historical sales (last 30 days)
     const daysBytes = 30;
     const startDate = dayjs().subtract(daysBytes, 'days').startOf('day').toDate();
 
-    // 3. Fetch sales data (completed orders only)
-    // We need to sum up quantities from OrderItems for Orders that are SHIPPED/DELIVERED/CONFIRMED
-    // actually simpler to just query OrderItems with include SalesOrder
-    const items = await OrderItem.findAll({
-        include: [{
-            model: SalesOrder,
-            where: {
-                companyId,
-                status: { [Op.in]: ['CONFIRMED', 'PICKING_IN_PROGRESS', 'PICKED', 'PACKING_IN_PROGRESS', 'PACKED', 'SHIPPED', 'DELIVERED'] },
-                createdAt: { [Op.gte]: startDate }
-            },
-            attributes: ['createdAt'] // optimization
-        }],
-        attributes: ['productId', 'quantity']
-    });
+    // 3. Fetch sales data (Aggregated by DB)
+    const [salesData] = await sequelize.query(
+        `SELECT oi.product_id, SUM(oi.quantity) as total 
+         FROM order_items oi
+         INNER JOIN sales_orders so ON so.id = oi.sales_order_id
+         WHERE so.company_id = ? 
+           AND so.status IN ('CONFIRMED', 'PICKING_IN_PROGRESS', 'PICKED', 'PACKING_IN_PROGRESS', 'PACKED', 'SHIPPED', 'DELIVERED')
+           AND so.created_at >= ?
+         GROUP BY oi.product_id`,
+        { replacements: [companyId, startDate] }
+    );
 
-    // 4. Map sales query to product map
-    const salesMap = {}; // productId -> totalQuantitySold
-    items.forEach(item => {
-        const pid = item.productId;
-        salesMap[pid] = (salesMap[pid] || 0) + item.quantity;
-    });
+    const salesMap = {};
+    if (Array.isArray(salesData)) {
+        salesData.forEach(row => {
+            salesMap[row.product_id] = parseFloat(row.total) || 0;
+        });
+    }
 
     // 5. Build prediction array
     const predictions = products.map(p => {
-        // Current Stock (sum of all stocks in all warehouses/locations)
-        // Note: ProductStocks might be an array if we have multiple entries, usually getting total quantity is safer
-        const currentStock = (p.ProductStocks || []).reduce((sum, s) => sum + Number(s.quantity), 0);
+        // Current Stock Calculation
+        let physicalStock = (p.ProductStocks || []).reduce((sum, s) => sum + Number(s.quantity), 0);
+        const virtualStock = (p.ProductStocks || []).find(s => s.isVirtual)?.quantity || 0;
+        const currentStock = Math.max(physicalStock, virtualStock);
+
+        // [NEW] Bundle/Formula Awareness
+        // If it's a bundle (virtual), compute its potential stock from components
+        if (p.productType === 'BUNDLE' || p.productType === 'MULTICOMBO') {
+             // For virtual bundles (not physical), the stock is based on components
+        }
+        
 
         // Velocity (Units per Day)
         const totalSold = salesMap[p.id] || 0;
@@ -95,7 +103,9 @@ async function getPredictionData(companyId) {
             daysUntilStockout: daysUntilStockout === null ? 9999 : Number(daysUntilStockout.toFixed(1)),
             suggestedReorder,
             status,
-            costPrice: p.costPrice
+            costPrice: p.costPrice,
+            warehouseId: p.warehouseId,
+            supplierId: p.supplierId
         };
     });
 
