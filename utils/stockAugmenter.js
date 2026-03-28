@@ -70,6 +70,11 @@ async function augmentProductStocks(products, companyId) {
 
             if (hasFormulaOrBundle && minAssembly !== Infinity) {
                 const stocks = Array.isArray(p.ProductStocks) ? p.ProductStocks : [];
+                
+                // [REVERT] Physical stock should NOT be capped by virtual capacity.
+                // 335 remains 335, even if components only allow 157.
+                // The virtual record will still show 157.
+
                 const virtualStockExists = stocks.some(s => s.isVirtual);
                 if (!virtualStockExists) {
                     stocks.push({ 

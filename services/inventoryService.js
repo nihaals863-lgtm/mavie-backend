@@ -718,6 +718,7 @@ async function listStock(reqUser, query = {}) {
       stocks.forEach((s, idx) => {
         if (s.productId === bProd.id && !s.isVirtual) {
           stocks[idx] = s.toJSON ? s.toJSON() : { ...s };
+          // [REVERT] Physical stock should NOT be capped by virtual capacity.
           stocks[idx].virtualQuantity = minAssembly;
           foundInOriginal = true;
         }
@@ -1133,12 +1134,14 @@ async function createAdjustment(data, reqUser) {
       }
     };
 
-    // [NEW] Get component details for feedback
+    // [NEW] Get component details for feedback - ONLY FOR DECREASE
     const componentDetails = [];
-    for (const bItem of bundle.BundleItems) {
-      await recursiveAdjustComponentStock(bItem.productId, Number(bItem.quantity) * qty);
-      const p = await Product.findByPk(bItem.productId, { attributes: ['id', 'name', 'sku'] });
-      if (p) componentDetails.push({ name: p.name, sku: p.sku, quantity: Number(bItem.quantity) * qty });
+    if (type === 'DECREASE') {
+      for (const bItem of bundle.BundleItems) {
+        await recursiveAdjustComponentStock(bItem.productId, Number(bItem.quantity) * qty);
+        const p = await Product.findByPk(bItem.productId, { attributes: ['id', 'name', 'sku'] });
+        if (p) componentDetails.push({ name: p.name, sku: p.sku, quantity: Number(bItem.quantity) * qty });
+      }
     }
 
     // [NEW] Also adjust static stock for the Bundle Product itself if it exists
@@ -1273,7 +1276,8 @@ async function removeAdjustment(id, reqUser) {
       include: [{ model: BundleItem }]
     });
 
-    if (bundle && bundle.BundleItems?.length) {
+    // Only revert components if the original adjustment was a DECREASE (consumption)
+    if (adj.type === 'DECREASE' && bundle && bundle.BundleItems?.length) {
       for (const bItem of bundle.BundleItems) {
         await recursiveRevertComponentStock(bItem.productId, Number(bItem.quantity) * Number(adj.quantity));
       }

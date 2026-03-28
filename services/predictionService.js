@@ -39,16 +39,20 @@ async function getPredictionData(companyId) {
     // 5. Build prediction array
     const predictions = products.map(p => {
         // Current Stock Calculation
-        let physicalStock = (p.ProductStocks || []).reduce((sum, s) => sum + Number(s.quantity), 0);
-        const virtualStock = (p.ProductStocks || []).find(s => s.isVirtual)?.quantity || 0;
-        const currentStock = Math.max(physicalStock, virtualStock);
+        let physicalStock = (p.ProductStocks || []).filter(s => !s.isVirtual).reduce((sum, s) => sum + Number(s.quantity), 0);
+        const virtualRecord = (p.ProductStocks || []).find(s => s.isVirtual);
+        const virtualStock = virtualRecord ? Number(virtualRecord.quantity) : Infinity;
+
+        // [REVERT] If physical exists, use it. Don't cap with virtual. 
+        // Virtual is a "Potential" added only if physical is 0. 
+        const currentStock = virtualRecord ? Math.max(physicalStock, virtualStock) : physicalStock;
 
         // [NEW] Bundle/Formula Awareness
         // If it's a bundle (virtual), compute its potential stock from components
         if (p.productType === 'BUNDLE' || p.productType === 'MULTICOMBO') {
-             // For virtual bundles (not physical), the stock is based on components
+            // For virtual bundles (not physical), the stock is based on components
         }
-        
+
 
         // Velocity (Units per Day)
         const totalSold = salesMap[p.id] || 0;

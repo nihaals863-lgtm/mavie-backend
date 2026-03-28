@@ -130,6 +130,10 @@ async function updateReceived(id, body, reqUser) {
     status: allReceived ? 'completed' : 'in_progress',
   });
 
+  if (allReceived && updated.purchaseOrderId) {
+    await PurchaseOrder.update({ status: 'received' }, { where: { id: updated.purchaseOrderId } });
+  }
+
   // Add received quantity (delta) to stock — existing inventory record update karo, naya sirf jab koi record na ho.
   const companyWarehouses = await Warehouse.findAll({ where: { companyId: updated.companyId }, attributes: ['id'], order: [['id', 'ASC']] });
   const warehouseIds = (companyWarehouses || []).map((w) => w.id);
