@@ -1,4 +1,4 @@
-const { Product, SalesOrder, OrderItem, ProductStock, sequelize } = require('../models');
+const { Product, SalesOrder, OrderItem, ProductStock, ProductionFormula, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const dayjs = require('dayjs');
 
@@ -6,7 +6,14 @@ async function getPredictionData(companyId) {
     // 1. Fetch all active products
     let products = await Product.findAll({
         where: { companyId, status: 'ACTIVE' },
-        include: [{ model: ProductStock, as: 'ProductStocks' }]
+        include: [
+            { model: ProductStock, as: 'ProductStocks' },
+            { 
+                model: ProductionFormula, 
+                where: { isDefault: true, companyId },
+                required: false
+            }
+        ]
     });
 
     // [NEW] Augment with virtual stock (Bundles/Formulas)
@@ -96,6 +103,9 @@ async function getPredictionData(companyId) {
             suggestedReorder = reorderQty;
         }
 
+        // Get formula-related defaults
+        const formula = p.ProductionFormulas && p.ProductionFormulas.length > 0 ? p.ProductionFormulas[0] : null;
+
         return {
             id: p.id,
             sku: p.sku,
@@ -108,8 +118,10 @@ async function getPredictionData(companyId) {
             suggestedReorder,
             status,
             costPrice: p.costPrice,
-            warehouseId: p.warehouseId,
-            supplierId: p.supplierId
+            warehouseId: p.warehouseId || (formula ? formula.warehouseId : null),
+            supplierId: p.supplierId,
+            productionAreaId: formula ? formula.productionAreaId : null,
+            hasFormula: !!formula
         };
     });
 

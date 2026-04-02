@@ -424,15 +424,15 @@ async function start() {
       }
       if (!tableDescription.production_area_id && !tableDescription.productionAreaId) {
         await queryInterface.addColumn('production_formulas', 'production_area_id', {
-           type: require('sequelize').DataTypes.INTEGER,
-           allowNull: true,
+          type: require('sequelize').DataTypes.INTEGER,
+          allowNull: true,
         });
         console.log('[Migration] Added production_area_id column to production_formulas.');
       }
       if (!tableDescription.warehouse_id && !tableDescription.warehouseId) {
         await queryInterface.addColumn('production_formulas', 'warehouse_id', {
-           type: require('sequelize').DataTypes.INTEGER,
-           allowNull: true,
+          type: require('sequelize').DataTypes.INTEGER,
+          allowNull: true,
         });
         console.log('[Migration] Added warehouse_id column to production_formulas.');
       }
