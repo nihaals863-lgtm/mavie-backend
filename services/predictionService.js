@@ -20,6 +20,22 @@ async function getPredictionData(companyId) {
     const { augmentProductStocks } = require('../utils/stockAugmenter');
     products = await augmentProductStocks(products, companyId);
 
+    // [NEW] Fetch Pending Purchase Orders to mark "Already Ordered" items
+    const [pendingOrders] = await sequelize.query(
+        `SELECT poi.product_id, SUM(poi.quantity) as total 
+         FROM purchase_order_items poi 
+         INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
+         WHERE po.company_id = ? AND po.status IN ('pending', 'draft', 'approved', 'sent', 'confirmed')
+         GROUP BY poi.product_id`,
+        { replacements: [companyId] }
+    );
+    const pendingPoMap = {};
+    if (Array.isArray(pendingOrders)) {
+        pendingOrders.forEach(row => {
+            pendingPoMap[row.product_id] = parseFloat(row.total) || 0;
+        });
+    }
+
     // 2. Define date range for historical sales (last 30 days)
     const daysBytes = 30;
     const startDate = dayjs().subtract(daysBytes, 'days').startOf('day').toDate();
@@ -126,7 +142,9 @@ async function getPredictionData(companyId) {
             warehouseId: p.warehouseId || (formula ? formula.warehouseId : null),
             supplierId: p.supplierId,
             productionAreaId: formula ? formula.productionAreaId : null,
-            hasFormula: !!formula
+            hasFormula: !!formula,
+            pendingOrderQty: pendingPoMap[p.id] || 0,
+            isOrdered: (pendingPoMap[p.id] || 0) > 0
         };
     });
 

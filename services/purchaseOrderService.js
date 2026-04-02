@@ -42,8 +42,9 @@ async function create(body, reqUser) {
   const companyId = reqUser.role === 'super_admin' ? (body.companyId || reqUser.companyId) : reqUser.companyId;
   if (!companyId) throw new Error('Company context required');
 
-  const count = await PurchaseOrder.count({ where: { companyId } });
-  const poNumber = `PO${String(count + 1).padStart(3, '0')}`;
+  const lastPo = await PurchaseOrder.findOne({ where: { companyId }, order: [['id', 'DESC']] });
+  const nextId = lastPo ? (lastPo.id + 1) : 1;
+  const poNumber = `PO${String(nextId).padStart(3, '0')}`;
 
   let supplierId = body.supplierId;
   if (!supplierId && body.items && body.items.length > 0) {
