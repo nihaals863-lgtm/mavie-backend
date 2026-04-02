@@ -81,21 +81,26 @@ async function getPredictionData(companyId) {
         let suggestedReorder = Math.ceil(needed - currentStock);
         if (suggestedReorder < 0) suggestedReorder = 0;
 
-        // Status prioritized by manual reorder point
+        // Status based on thresholds
         let status = 'HEALTHY';
         const reorderLevel = Number(p.reorderLevel) || 0;
         const reorderQty = Number(p.reorderQty) || 0;
+        const lowThreshold = Number(p.lowStockThreshold) || 0;
+        const mediumThreshold = Number(p.mediumStockThreshold) || 0;
 
-        if (reorderLevel > 0 && currentStock <= reorderLevel) {
+        if (currentStock < reorderLevel || currentStock === 0) {
             status = 'CRITICAL';
+        } else if (lowThreshold > 0 && currentStock <= lowThreshold) {
+            status = 'LOW';
+        } else if (mediumThreshold > 0 && currentStock <= mediumThreshold) {
+            status = 'MEDIUM';
         } else if (daysUntilStockout !== null) {
+            // Velocity-based fallback if thresholds aren't aggressive enough
             if (daysUntilStockout < leadTime) {
-                status = 'CRITICAL'; // Will run out before new stock arrives
+                status = 'CRITICAL';
             } else if (daysUntilStockout < (leadTime + safetyStockDays)) {
-                status = 'LOW'; // Dipping into safety stock
+                if (status === 'HEALTHY' || status === 'MEDIUM') status = 'LOW';
             }
-        } else if (currentStock === 0) {
-            status = 'CRITICAL'; // No stock, no sales (or sales 0)
         }
 
         // Use reorderQty if it's set and higher than suggested

@@ -209,6 +209,28 @@ async function start() {
       console.error('[Migration Error] Failure adding unit_of_measure to products:', migrationErr.message);
     }
 
+    // Safe migration: ensure low_stock_threshold and medium_stock_threshold columns exist in products
+    try {
+      const queryInterface = sequelize.getQueryInterface();
+      const tableDescription = await queryInterface.describeTable('products');
+      if (!tableDescription.low_stock_threshold && !tableDescription.lowStockThreshold) {
+        await queryInterface.addColumn('products', 'low_stock_threshold', {
+          type: require('sequelize').DataTypes.INTEGER,
+          allowNull: true,
+          defaultValue: 0,
+        });
+      }
+      if (!tableDescription.medium_stock_threshold && !tableDescription.mediumStockThreshold) {
+        await queryInterface.addColumn('products', 'medium_stock_threshold', {
+          type: require('sequelize').DataTypes.INTEGER,
+          allowNull: true,
+          defaultValue: 0,
+        });
+      }
+    } catch (migrationErr) {
+      console.warn('[Migration Warning] Could not add stock thresholds to products:', migrationErr.message);
+    }
+
     // Safe migration: ensure currency column exists in products
     try {
       const queryInterface = sequelize.getQueryInterface();

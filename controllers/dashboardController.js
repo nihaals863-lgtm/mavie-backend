@@ -66,19 +66,34 @@ async function stats(req, res, next) {
       totalStock = result || 0;
     }
 
-    // Low stock: products where sum(stock) < reorderLevel (company-scoped)
+    // Stock Health: products categorized by reorder levels and thresholds
+    let criticalStockCount = 0;
     let lowStockCount = 0;
+    let mediumStockCount = 0;
     if (companyId) {
       const products = await Product.findAll({
         where: { ...baseWhere, status: 'ACTIVE' },
-        attributes: ['id', 'reorderLevel'],
+        attributes: ['id', 'reorderLevel', 'lowStockThreshold', 'mediumStockThreshold'],
       });
-      const whIds = (await Warehouse.findAll({ where: { companyId }, attributes: ['id'] })).map((w) => w.id);
+      const warehouses = await Warehouse.findAll({ where: { companyId }, attributes: ['id'] });
+      const whIds = warehouses.map((w) => w.id);
+      
       for (const p of products) {
-        const sum = await ProductStock.sum('quantity', {
+        const sumResult = await ProductStock.sum('quantity', {
           where: { productId: p.id, warehouseId: { [Op.in]: whIds } },
         });
-        if ((sum || 0) < (p.reorderLevel || 0)) lowStockCount += 1;
+        const sum = sumResult || 0;
+        const reorderLevel = p.reorderLevel || 0;
+        const lowThreshold = p.lowStockThreshold || 0;
+        const mediumThreshold = p.mediumStockThreshold || 0;
+
+        if (sum < reorderLevel || sum === 0) {
+          criticalStockCount += 1;
+        } else if (lowThreshold > 0 && sum <= lowThreshold) {
+          lowStockCount += 1;
+        } else if (mediumThreshold > 0 && sum <= mediumThreshold) {
+          mediumStockCount += 1;
+        }
       }
     }
 
@@ -93,6 +108,8 @@ async function stats(req, res, next) {
         totalOrders: counts[5],
         totalStock,
         lowStockCount,
+        criticalStockCount,
+        mediumStockCount,
         pickingPendingCount: counts[6],
         packingPendingCount: counts[7],
       },

@@ -205,7 +205,9 @@ async function createProduct(data, reqUser) {
     weight: data.weight != null ? data.weight : null,
     weightUnit: data.weightUnit || null,
     reorderLevel: data.reorderLevel ?? 0,
-    reorderQty: data.reorderQty != null ? data.reorderQty : null,
+    reorderQty: data.reorderQty ?? 0,
+    lowStockThreshold: data.lowStockThreshold ?? 0,
+    mediumStockThreshold: data.mediumStockThreshold ?? 0,
     maxStock: data.maxStock != null ? data.maxStock : null,
     status: data.status || 'ACTIVE',
     images: Array.isArray(data.images) ? data.images : null,
@@ -396,6 +398,8 @@ async function updateProduct(id, data, reqUser) {
   if (data.weightUnit !== undefined) upd.weightUnit = data.weightUnit;
   if (data.reorderLevel !== undefined) upd.reorderLevel = data.reorderLevel;
   if (data.reorderQty !== undefined) upd.reorderQty = data.reorderQty;
+  if (data.lowStockThreshold !== undefined) upd.lowStockThreshold = data.lowStockThreshold;
+  if (data.mediumStockThreshold !== undefined) upd.mediumStockThreshold = data.mediumStockThreshold;
   if (data.maxStock !== undefined) upd.maxStock = data.maxStock;
   if (data.status !== undefined) upd.status = data.status ?? product.status;
   if (data.images !== undefined) upd.images = Array.isArray(data.images) ? data.images : product.images;
