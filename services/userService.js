@@ -11,11 +11,12 @@ async function list(reqUser, query = {}) {
     if (query.role) where.role = query.role;
   } else if (reqUser.role === 'company_admin') {
     where.companyId = reqUser.companyId;
+    const allowedRoles = ['company_admin', ...STAFF_ROLES];
     if (query.role) {
-      if (STAFF_ROLES.includes(query.role)) where.role = query.role;
-      else where.role = { [Op.in]: STAFF_ROLES }; // Fallback or empty? Fallback to all staff seems safer or maybe empty
+      if (allowedRoles.includes(query.role)) where.role = query.role;
+      else where.role = { [Op.in]: allowedRoles };
     } else {
-      where.role = { [Op.in]: STAFF_ROLES };
+      where.role = { [Op.in]: allowedRoles };
     }
   } else {
     return [];
@@ -49,7 +50,8 @@ async function getById(id, reqUser) {
   });
   if (!user) throw new Error('User not found');
   if (reqUser.role === 'company_admin' && user.companyId !== reqUser.companyId) throw new Error('User not found');
-  if (reqUser.role === 'company_admin' && !STAFF_ROLES.includes(user.role)) throw new Error('User not found');
+  const allowedRoles = ['company_admin', ...STAFF_ROLES];
+  if (reqUser.role === 'company_admin' && !allowedRoles.includes(user.role)) throw new Error('User not found');
   return user;
 }
 
@@ -60,7 +62,8 @@ async function create(data, reqUser) {
     if (!data.companyId) throw new Error('companyId required');
   }
   if (reqUser.role === 'company_admin') {
-    if (!STAFF_ROLES.includes(data.role)) throw new Error('Invalid role for staff');
+    const allowedRoles = ['company_admin', ...STAFF_ROLES];
+    if (!allowedRoles.includes(data.role)) throw new Error('Invalid role for staff');
     data.companyId = reqUser.companyId;
   }
   if (!data.password || data.password.length < 6) throw new Error('Password min 6 characters');
@@ -72,9 +75,10 @@ async function update(id, data, reqUser) {
   if (!user) throw new Error('User not found');
   if (reqUser.role === 'company_admin') {
     if (user.companyId !== reqUser.companyId) throw new Error('User not found');
-    if (!STAFF_ROLES.includes(user.role)) throw new Error('User not found');
+    const allowedRoles = ['company_admin', ...STAFF_ROLES];
+    if (!allowedRoles.includes(user.role)) throw new Error('User not found');
     delete data.companyId;
-    if (data.role !== undefined && !STAFF_ROLES.includes(data.role)) delete data.role;
+    if (data.role !== undefined && !allowedRoles.includes(data.role)) delete data.role;
   }
   if (data.password) {
     user.passwordHash = await authService.hashPassword(data.password);
@@ -91,7 +95,8 @@ async function update(id, data, reqUser) {
 async function remove(id, reqUser) {
   const user = await User.findByPk(id);
   if (!user) throw new Error('User not found');
-  if (reqUser.role === 'company_admin' && (user.companyId !== reqUser.companyId || !STAFF_ROLES.includes(user.role))) {
+  const allowedRoles = ['company_admin', ...STAFF_ROLES];
+  if (reqUser.role === 'company_admin' && (user.companyId !== reqUser.companyId || !allowedRoles.includes(user.role))) {
     throw new Error('User not found');
   }
   await user.destroy();

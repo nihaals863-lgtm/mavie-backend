@@ -68,6 +68,8 @@ Company.hasMany(GoodsReceipt, { foreignKey: 'companyId' });
 GoodsReceipt.belongsTo(Company, { foreignKey: 'companyId' });
 Company.hasMany(VatCode, { foreignKey: 'companyId' });
 VatCode.belongsTo(Company, { foreignKey: 'companyId' });
+Company.hasMany(Role, { foreignKey: 'companyId' });
+Role.belongsTo(Company, { foreignKey: 'companyId' });
 
 // Product -> Supplier
 Supplier.hasMany(Product, { foreignKey: 'supplierId' });
