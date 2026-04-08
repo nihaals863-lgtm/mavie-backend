@@ -1,8 +1,18 @@
 const { Role } = require('../models');
+const { Op } = require('sequelize');
 
 async function list(req, res, next) {
     try {
-        const roles = await Role.findAll({ order: [['id', 'ASC']] });
+        const query = {
+            where: {
+                [Op.or]: [
+                    { isSystem: true },
+                    { companyId: req.user.companyId }
+                ]
+            },
+            order: [['id', 'ASC']]
+        };
+        const roles = await Role.findAll(query);
         res.json({ success: true, data: roles });
     } catch (err) {
         next(err);
@@ -11,7 +21,13 @@ async function list(req, res, next) {
 
 async function create(req, res, next) {
     try {
-        const role = await Role.create(req.body);
+        // Enforce companyId from token
+        const payload = {
+            ...req.body,
+            companyId: req.user.companyId,
+            isSystem: false // Users can only create non-system roles
+        };
+        const role = await Role.create(payload);
         res.status(201).json({ success: true, data: role });
     } catch (err) {
         next(err);
@@ -26,6 +42,11 @@ async function update(req, res, next) {
         
         if (role.isSystem) {
             return res.status(403).json({ success: false, message: 'System roles cannot be modified' });
+        }
+
+        // Only owner or super_admin can update
+        if (role.companyId !== req.user.companyId && req.user.role !== 'super_admin') {
+            return res.status(403).json({ success: false, message: 'Access denied to this role' });
         }
 
         await role.update(req.body);
@@ -43,6 +64,11 @@ async function remove(req, res, next) {
 
         if (role.isSystem) {
             return res.status(403).json({ success: false, message: 'System roles cannot be deleted' });
+        }
+
+        // Only owner or super_admin can delete
+        if (role.companyId !== req.user.companyId && req.user.role !== 'super_admin') {
+            return res.status(403).json({ success: false, message: 'Access denied to this role' });
         }
 
         await role.destroy();

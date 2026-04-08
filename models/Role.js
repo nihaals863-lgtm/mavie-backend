@@ -12,7 +12,8 @@ const Role = sequelize.define('Role', {
     validate: { isIn: [['all', 'assigned', 'none']] } 
   },
   permissions: { type: DataTypes.JSON, allowNull: true }, // Array of permission strings/objects
-  isSystem: { type: DataTypes.BOOLEAN, defaultValue: false }
+  isSystem: { type: DataTypes.BOOLEAN, defaultValue: false },
+  companyId: { type: DataTypes.INTEGER, allowNull: true, field: 'company_id' }
 }, {
   tableName: 'roles',
   timestamps: true,
