@@ -35,6 +35,7 @@ const ProductionOrderItem = require('./ProductionOrderItem');
 const ProductionFormula = require('./ProductionFormula');
 const ProductionFormulaItem = require('./ProductionFormulaItem');
 const Notification = require('./Notification');
+const Role = require('./Role');
 
 // Company
 Company.hasMany(User, { foreignKey: 'companyId' });
@@ -280,4 +281,5 @@ module.exports = {
   ProductionFormula,
   ProductionFormulaItem,
   Notification,
+  Role,
 };

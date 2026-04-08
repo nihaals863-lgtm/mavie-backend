@@ -9,7 +9,6 @@ const User = sequelize.define('User', {
   role: {
     type: DataTypes.STRING,
     allowNull: false,
-    validate: { isIn: [['super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager', 'picker', 'packer', 'viewer']] },
   },
   companyId: { type: DataTypes.INTEGER, allowNull: true },
   warehouseId: { type: DataTypes.INTEGER, allowNull: true },

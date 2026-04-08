@@ -24,6 +24,7 @@ const returnRoutes = require('./returnRoutes');
 const vatCodeRoutes = require('./vatCodeRoutes');
 const labelsController = require('../controllers/labelsController');
 const searchController = require('../controllers/searchController');
+const roleRoutes = require('./roles');
 
 router.use('/auth', authRoutes);
 const searchRoles = ['super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager', 'viewer', 'picker', 'packer'];
@@ -35,6 +36,7 @@ router.get('/api/superadmin/reports', authenticate, requireSuperAdmin, superadmi
 router.use('/api/superadmin', superadminRoutes);
 router.use('/api/company', companyRoutes);
 router.use('/api/users', userRoutes);
+router.use('/api/roles', roleRoutes);
 router.use('/api/warehouses', warehouseRoutes);
 router.use('/api/zones', zoneRoutes);
 router.use('/api/locations', locationRoutes);
